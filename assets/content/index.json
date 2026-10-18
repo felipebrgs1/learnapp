@@ -2,6 +2,8 @@
   "topics": [
     "gitops.json",
     "git-internals.json",
+    "containers-1.json",
+    "containers-2.json",
     "kubernetes-1.json",
     "kubernetes-2.json",
     "kubernetes-3.json",

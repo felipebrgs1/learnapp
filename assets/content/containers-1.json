@@ -1,0 +1,1356 @@
+{
+  "id": "containers-1",
+  "title": "Containers 1 — O que é um container, por dentro",
+  "summary": "Um container é um processo Linux isolado por namespaces, limitado por cgroups e empacotado em camadas OCI: entenda cada mecanismo e a pilha Docker, containerd e runc.",
+  "category": "Infraestrutura",
+  "level": "Iniciante",
+  "minutes": 34,
+  "updated": "out 2026",
+  "tags": [
+    "containers",
+    "docker",
+    "podman",
+    "namespaces",
+    "cgroups",
+    "overlayfs",
+    "oci",
+    "runc",
+    "containerd",
+    "imagem",
+    "linux",
+    "isolamento",
+    "vm",
+    "unshare"
+  ],
+  "series": "Containers",
+  "part": 1,
+  "sections": [
+    {
+      "id": "problema",
+      "title": "O problema: dependências e ambientes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Todo software depende de coisas que ele não carrega consigo: versão do interpretador, bibliotecas compartilhadas (`libssl`, `glibc`), variáveis de ambiente, arquivos de configuração, até o formato do sistema de arquivos. Quando duas aplicações no mesmo servidor exigem versões incompatíveis da mesma biblioteca, ou quando o ambiente de produção difere do notebook do desenvolvedor, surge o clássico **\"na minha máquina funciona\"** — também chamado de _dependency hell_."
+        },
+        {
+          "type": "p",
+          "text": "Containers resolvem isso empacotando a aplicação **junto com o sistema de arquivos de que ela precisa** (tudo, menos o kernel) e executando-a isolada do resto da máquina. O mesmo artefato roda igual no laptop, no CI e em produção."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Reprodutibilidade**: a imagem é imutável e identificada por hash; o que foi testado é o que vai para produção.",
+            "**Densidade**: dezenas de containers dividem um único kernel, sem o custo de um sistema operacional completo por aplicação.",
+            "**Velocidade**: iniciar um container é iniciar um processo — milissegundos a poucos segundos.",
+            "**Portabilidade**: o formato é um padrão aberto (OCI), aceito por Docker, Podman, containerd, Kubernetes e provedores de nuvem."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Máquina virtual versus container"
+        },
+        {
+          "type": "p",
+          "text": "Uma VM virtualiza o **hardware**: um hypervisor (KVM, Xen, Hyper-V) apresenta CPU, disco e placa de rede virtuais, e sobre eles roda um kernel inteiro por VM. Um container virtualiza o **sistema operacional**: todos compartilham o kernel do host, e o próprio kernel cria a ilusão de que cada processo tem a máquina só para si."
+        },
+        {
+          "type": "diagram",
+          "title": "Pilha de uma VM vs. pilha de containers",
+          "caption": "Cada VM carrega seu próprio kernel (guest OS). Containers compartilham o kernel do host; o que os separa são recursos do kernel (namespaces e cgroups), não um hardware emulado.",
+          "cols": 12,
+          "rows": 8.2,
+          "nodes": [
+            {
+              "id": "va",
+              "label": "App A",
+              "x": 0.3,
+              "y": 1.1,
+              "w": 2.6,
+              "h": 1.5
+            },
+            {
+              "id": "vb",
+              "label": "App B",
+              "x": 3.1,
+              "y": 1.1,
+              "w": 2.6,
+              "h": 1.5
+            },
+            {
+              "id": "vga",
+              "label": "SO guest",
+              "sub": "kernel A",
+              "x": 0.3,
+              "y": 2.9,
+              "w": 2.6,
+              "h": 1.6,
+              "variant": "muted"
+            },
+            {
+              "id": "vgb",
+              "label": "SO guest",
+              "sub": "kernel B",
+              "x": 3.1,
+              "y": 2.9,
+              "w": 2.6,
+              "h": 1.6,
+              "variant": "muted"
+            },
+            {
+              "id": "vh",
+              "label": "Hypervisor",
+              "x": 0.3,
+              "y": 4.8,
+              "w": 5.4,
+              "h": 1.5
+            },
+            {
+              "id": "vhw",
+              "label": "Hardware",
+              "x": 0.3,
+              "y": 6.5,
+              "w": 5.4,
+              "h": 1.0,
+              "variant": "dashed"
+            },
+            {
+              "id": "ca",
+              "label": "App A",
+              "sub": "+ libs",
+              "x": 6.5,
+              "y": 1.1,
+              "w": 2.6,
+              "h": 1.5
+            },
+            {
+              "id": "cb",
+              "label": "App B",
+              "sub": "+ libs",
+              "x": 9.3,
+              "y": 1.1,
+              "w": 2.6,
+              "h": 1.5
+            },
+            {
+              "id": "cr",
+              "label": "Container runtime",
+              "x": 6.5,
+              "y": 2.9,
+              "w": 5.4,
+              "h": 1.6,
+              "variant": "muted"
+            },
+            {
+              "id": "ck",
+              "label": "Kernel do host",
+              "sub": "compartilhado",
+              "x": 6.5,
+              "y": 4.8,
+              "w": 5.4,
+              "h": 1.5,
+              "variant": "accent"
+            },
+            {
+              "id": "chw",
+              "label": "Hardware",
+              "x": 6.5,
+              "y": 6.5,
+              "w": 5.4,
+              "h": 1.0,
+              "variant": "dashed"
+            }
+          ],
+          "edges": [],
+          "groups": [
+            {
+              "label": "Máquinas virtuais",
+              "x": 0,
+              "y": 0,
+              "w": 6,
+              "h": 7.8
+            },
+            {
+              "label": "Containers",
+              "x": 6.2,
+              "y": 0,
+              "w": 5.8,
+              "h": 7.8
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Máquina virtual",
+            "Container"
+          ],
+          "rows": [
+            [
+              "Isolamento",
+              "Hardware virtual + kernel próprio (fronteira forte)",
+              "Processos no mesmo kernel (fronteira mais fina)"
+            ],
+            [
+              "Tamanho típico",
+              "Gigabytes (SO completo)",
+              "Megabytes a algumas centenas de MB"
+            ],
+            [
+              "Inicialização",
+              "Dezenas de segundos (boot do SO)",
+              "Milissegundos a poucos segundos"
+            ],
+            [
+              "Overhead de memória",
+              "Centenas de MB por guest OS",
+              "Quase nenhum além do próprio processo"
+            ],
+            [
+              "Kernel",
+              "Um por VM, qualquer SO",
+              "Compartilhado: Linux em containers Linux"
+            ],
+            [
+              "Superfície de ataque",
+              "Interface do hypervisor (pequena)",
+              "Toda a interface de syscalls do kernel"
+            ]
+          ]
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Tempo de inicialização (ordem de grandeza)",
+          "unit": "s",
+          "caption": "Dados ilustrativos: valores variam muito com hardware, imagem e SO. O ponto é a ordem de grandeza, não a medição.",
+          "bars": [
+            {
+              "label": "VM com SO completo",
+              "value": 30,
+              "display": "~30 s"
+            },
+            {
+              "label": "microVM (Firecracker)",
+              "value": 0.15,
+              "display": "~0,15 s"
+            },
+            {
+              "label": "Container",
+              "value": 0.5,
+              "display": "~0,5 s"
+            }
+          ]
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Memória de overhead por instância (ordem de grandeza)",
+          "unit": "MB",
+          "caption": "Dados ilustrativos: o overhead de uma VM é o guest OS mais o hypervisor; o de um container é basicamente zero além do processo da aplicação.",
+          "bars": [
+            {
+              "label": "VM (guest OS)",
+              "value": 400,
+              "display": "~400 MB"
+            },
+            {
+              "label": "microVM",
+              "value": 5,
+              "display": "~5 MB"
+            },
+            {
+              "label": "Container",
+              "value": 1,
+              "display": "< 1 MB"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Containers **não** são uma tecnologia de segurança equivalente a VMs. Um bug do kernel pode atravessar a fronteira. Quando o isolamento precisa ser forte (código de terceiros, multi-tenant), usa-se um runtime sandboxed como gVisor ou Kata — veja a seção sobre runtimes.",
+          "title": "Isolamento tem grau"
+        }
+      ]
+    },
+    {
+      "id": "processo",
+      "title": "Um container é um processo com isolamento",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A frase que desmistifica tudo: **um container é um processo Linux comum**, iniciado com restrições. Não existe uma chamada de sistema `create_container()`. O kernel oferece blocos de construção independentes, e o runtime os combina:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Namespaces** limitam o que o processo *enxerga* (processos, rede, pontos de montagem, hostname, usuários...).",
+            "**cgroups** limitam o que o processo *consome* (CPU, memória, I/O, número de processos).",
+            "**Sistema de arquivos próprio** (raiz trocada, camadas sobrepostas) define quais arquivos existem.",
+            "**Capabilities, seccomp e LSMs** (AppArmor/SELinux) limitam o que o processo *pode fazer* mesmo dentro disso."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Do ponto de vista do host, o processo do container aparece em `ps` como qualquer outro, com um PID alto. De dentro, ele acredita ser o PID 1 de uma máquina própria."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ docker run -d --name web nginx\n$ docker inspect -f '{{.State.Pid}}' web\n48213\n$ ps -o pid,ppid,user,cmd -p 48213\n    PID    PPID USER     CMD\n  48213   48190 root     nginx: master process nginx -g daemon off;"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Se você entende namespaces, cgroups e overlayfs, entende containers: o resto (Docker, Podman, Kubernetes) é ferramenta de conveniência em cima deles."
+        }
+      ]
+    },
+    {
+      "id": "namespaces",
+      "title": "Namespaces: o que o processo enxerga",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um **namespace** envolve um recurso global do kernel em uma abstração; processos dentro do namespace veem sua própria instância do recurso. Cada processo pertence a exatamente um namespace de cada tipo, e novos processos herdam os do pai. Há 8 tipos no Linux atual:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Namespace",
+            "Isola",
+            "Efeito prático"
+          ],
+          "rows": [
+            [
+              "`pid`",
+              "Árvore de IDs de processo",
+              "O primeiro processo é o PID 1; não vê processos do host"
+            ],
+            [
+              "`net`",
+              "Interfaces, rotas, iptables/nftables, portas",
+              "Container tem sua própria `eth0` e `localhost`"
+            ],
+            [
+              "`mnt`",
+              "Tabela de pontos de montagem",
+              "Raiz `/` diferente da do host"
+            ],
+            [
+              "`uts`",
+              "Hostname e domainname",
+              "`hostname` próprio por container"
+            ],
+            [
+              "`ipc`",
+              "SysV IPC e filas POSIX",
+              "Memória compartilhada não vaza entre containers"
+            ],
+            [
+              "`user`",
+              "Mapeamento de UIDs/GIDs",
+              "`root` dentro pode ser UID sem privilégio fora (base do rootless)"
+            ],
+            [
+              "`cgroup`",
+              "Visão da hierarquia de cgroups",
+              "Container vê seu cgroup como a raiz"
+            ],
+            [
+              "`time`",
+              "Relógios `CLOCK_MONOTONIC`/`BOOTTIME` (kernel 5.6+)",
+              "Offsets de tempo próprios; raramente usado em containers"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Três chamadas de sistema manipulam namespaces: `clone()` (cria um processo já em novos namespaces), `unshare()` (move o processo atual para novos namespaces) e `setns()` (entra em namespaces existentes — é o que `docker exec` e `nsenter` fazem)."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "O namespace de **rede** vem vazio: só tem `lo`. Quem liga o container ao mundo é o runtime, criando um par `veth` com uma ponta dentro e outra numa bridge no host. Isso é assunto da Parte 2.",
+          "title": "Rede nasce isolada"
+        }
+      ]
+    },
+    {
+      "id": "pratica-ns",
+      "title": "Na prática: criando um \"container\" à mão",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Você não precisa de Docker para ver namespaces funcionando. O utilitário `unshare` (do util-linux) envolve a chamada de sistema homônima. A opção `--user --map-root-user` cria um user namespace em que seu usuário vira \"root\" aparente, então dá para testar sem `sudo`:"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ unshare --user --map-root-user --pid --fork --mount-proc \\\n    sh -c 'echo \"meu pid: $$\"; ps -ef; id'\nmeu pid: 1\nUID   PID  PPID  C STIME TTY      TIME CMD\nroot    1     0  0 20:26 ?    00:00:00 sh -c echo \"meu pid: $$\"; ps -ef; id\nroot    2     1  0 20:26 ?    00:00:00 ps -ef\nuid=0(root) gid=0(root) groups=0(root),65534(nobody)"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`--pid` cria um novo PID namespace; `--fork` é necessário porque o próprio `unshare` continua no namespace antigo — só os **filhos** entram no novo.",
+            "`--mount-proc` monta um `/proc` novo num mount namespace próprio; sem isso o `ps` leria o `/proc` do host e mostraria todos os processos.",
+            "O shell é o PID 1: quando ele sai, o kernel mata todos os outros processos do namespace."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Inspecionando namespaces"
+        },
+        {
+          "type": "p",
+          "text": "Cada processo expõe seus namespaces em `/proc/<pid>/ns/`. Dois processos estão no mesmo namespace se o inode (número entre colchetes) for igual:"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ ls -l /proc/self/ns\ncgroup -> 'cgroup:[4026531835]'\nipc    -> 'ipc:[4026531839]'\nmnt    -> 'mnt:[4026531832]'\nnet    -> 'net:[4026531833]'\npid    -> 'pid:[4026531836]'\ntime   -> 'time:[4026531834]'\nuser   -> 'user:[4026531837]'\nuts    -> 'uts:[4026531838]'\n\n$ lsns -t pid          # lista namespaces e quem os criou\n$ sudo nsenter -t 48213 -n ip addr   # entra só no net ns do container"
+        },
+        {
+          "type": "p",
+          "text": "`nsenter` é a ferramenta de depuração favorita: executa um binário **do host** (que tem `ip`, `ss`, `tcpdump`) dentro dos namespaces de um container mínimo que não tem nada disso."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Criar namespaces que não sejam `user` exige a capability `CAP_SYS_ADMIN` no namespace de usuário dono. Distribuições como Ubuntu 24.04+ restringem user namespaces sem privilégio via AppArmor (`kernel.apparmor_restrict_unprivileged_userns`); se o comando acima falhar com \"Operation not permitted\", é isso.",
+          "title": "Falha ao rodar sem sudo"
+        }
+      ]
+    },
+    {
+      "id": "cgroups",
+      "title": "cgroups v2: o que o processo consome",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Namespaces escondem coisas; não limitam nada. Quem impõe limites é o **cgroup** (control group): uma árvore hierárquica de grupos de processos, exposta como sistema de arquivos em `/sys/fs/cgroup`. Cada diretório é um grupo; escrever em arquivos de controle define os limites; escrever um PID em `cgroup.procs` move o processo para o grupo."
+        },
+        {
+          "type": "p",
+          "text": "O **cgroups v2** (hierarquia unificada, padrão em todas as distribuições atuais e exigido por Kubernetes recente — o suporte a cgroup v1 está em modo de manutenção) substituiu a v1, em que cada controlador tinha sua própria árvore. Os arquivos principais:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Arquivo",
+            "Controla",
+            "Exemplo"
+          ],
+          "rows": [
+            [
+              "`cpu.max`",
+              "Cota de CPU: `quota período` em µs",
+              "`50000 100000` = 50% de uma CPU"
+            ],
+            [
+              "`cpu.weight`",
+              "Peso relativo sob disputa (1–10000)",
+              "`100` é o padrão"
+            ],
+            [
+              "`memory.max`",
+              "Limite rígido de memória",
+              "`268435456` (256 MiB) ou `256M`"
+            ],
+            [
+              "`memory.high`",
+              "Limite brando: estrangula antes de matar",
+              "Reclaim agressivo ao ultrapassar"
+            ],
+            [
+              "`pids.max`",
+              "Máximo de processos/threads",
+              "`100` contra fork bomb"
+            ],
+            [
+              "`io.max`",
+              "Limites de IOPS/banda por dispositivo",
+              "`8:0 rbps=10485760`"
+            ],
+            [
+              "`memory.events`",
+              "Contadores (`oom`, `oom_kill`, `high`)",
+              "Mostra se algo foi morto"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "CPU: quota por período"
+        },
+        {
+          "type": "p",
+          "text": "O limite de CPU não é \"quantos núcleos\": é uma **fatia de tempo por período**. Com `cpu.max = 50000 100000`, o grupo pode usar 50 ms de CPU a cada 100 ms de relógio, somando todas as threads. Um container com `--cpus=2` recebe `200000 100000`. Ao esgotar a cota no período, as threads ficam bloqueadas até o próximo (_throttling_) — por isso uma aplicação multithread com limite baixo pode ter latência pontual alta mesmo com a CPU \"sobrando\"."
+        },
+        {
+          "type": "h",
+          "text": "Memória: o OOM killer"
+        },
+        {
+          "type": "p",
+          "text": "Se o grupo ultrapassa `memory.max` e o kernel não consegue recuperar páginas (cache, swap), o **OOM killer** encerra um processo do grupo com `SIGKILL` (exit code 137 = 128 + 9). Não há aviso nem chance de _shutdown_ limpo. O Docker marca `OOMKilled: true` no `docker inspect`."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ docker run -d --name cg --cpus=0.5 --memory=64m --pids-limit=50 nginx\n$ CG=/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' cg).scope\n$ cat $CG/cpu.max $CG/memory.max $CG/pids.max\n50000 100000\n67108864\n50\n$ cat $CG/memory.events\nlow 0\nhigh 0\nmax 0\noom 0\noom_kill 0"
+        },
+        {
+          "type": "p",
+          "text": "O mesmo sem Docker, só com o sistema de arquivos (como root; requer o controlador habilitado no pai):"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# mkdir /sys/fs/cgroup/demo\n# echo \"+cpu +memory +pids\" > /sys/fs/cgroup/cgroup.subtree_control\n# echo \"50000 100000\" > /sys/fs/cgroup/demo/cpu.max\n# echo 64M > /sys/fs/cgroup/demo/memory.max\n# echo $$ > /sys/fs/cgroup/demo/cgroup.procs   # este shell entra no grupo\n# stress-ng --cpu 1 --timeout 10s              # é limitado a ~50% de CPU"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Se o processo lê o limite errado, quebra. JVMs antigas, Node e Go (antes do 1.25) dimensionavam heap e threads pelo número de CPUs do **host**, não pela cota do cgroup. Runtimes modernos já leem `cpu.max` e `memory.max`; ainda assim confira `GOMAXPROCS`, `-XX:MaxRAMPercentage` e afins.",
+          "title": "Runtime que ignora o cgroup"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Em systemd, cada serviço e cada container já ganha seu próprio cgroup (`.scope` ou `.service`). `systemd-cgls` e `systemd-cgtop` mostram a árvore e o consumo ao vivo.",
+          "title": "Onde ver"
+        }
+      ]
+    },
+    {
+      "id": "filesystem",
+      "title": "Sistema de arquivos: raiz própria e camadas",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Para o container ter sua própria distribuição (Alpine, Debian, Distroless) apesar de rodar no kernel do host, o runtime troca a raiz `/` do processo por um diretório com os arquivos da imagem."
+        },
+        {
+          "type": "h",
+          "text": "chroot e pivot_root"
+        },
+        {
+          "type": "p",
+          "text": "`chroot` muda o diretório raiz *visto* pelo processo, mas é fácil de escapar (o diretório antigo continua montado e acessível por descritores abertos). Runtimes usam **`pivot_root`** dentro de um mount namespace: troca a raiz do namespace e **desmonta** a raiz antiga, de modo que o host deixa de existir para o processo."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# o que o runc faz, simplificado\nunshare --mount --fork sh -c '\n  mount --bind /rootfs /rootfs        # rootfs precisa ser um ponto de montagem\n  cd /rootfs && mkdir -p .old\n  pivot_root . .old                   # nova raiz = /rootfs\n  umount -l /.old                     # some com o sistema de arquivos do host\n  exec /bin/sh\n'"
+        },
+        {
+          "type": "h",
+          "text": "OverlayFS: camadas sem cópia"
+        },
+        {
+          "type": "p",
+          "text": "Copiar a imagem inteira para cada container desperdiçaria disco e tempo. O **OverlayFS** (padrão do Docker e containerd via driver `overlay2`) empilha diretórios e apresenta uma visão unificada:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**lowerdir**: uma ou mais camadas somente leitura (as camadas da imagem), compartilhadas por todos os containers.",
+            "**upperdir**: camada gravável exclusiva do container.",
+            "**workdir**: diretório de trabalho interno do overlayfs (mesmo sistema de arquivos do upperdir).",
+            "**merged**: o ponto de montagem que o container vê como `/`."
+          ]
+        },
+        {
+          "type": "diagram",
+          "title": "OverlayFS de um container",
+          "caption": "Leituras percorrem as camadas de cima para baixo e retornam o primeiro arquivo encontrado. Toda escrita vai para o upperdir. As camadas da imagem nunca são alteradas.",
+          "cols": 12,
+          "rows": 10.4,
+          "nodes": [
+            {
+              "id": "m",
+              "label": "merged  (/)",
+              "sub": "o que o container vê",
+              "x": 3,
+              "y": 0.4,
+              "w": 6,
+              "h": 2,
+              "variant": "accent"
+            },
+            {
+              "id": "u",
+              "label": "upperdir",
+              "sub": "gravável (RW)",
+              "x": 0.3,
+              "y": 5,
+              "w": 5,
+              "h": 2
+            },
+            {
+              "id": "l2",
+              "label": "lowerdir: camada 2",
+              "sub": "app (RO)",
+              "x": 6.7,
+              "y": 5,
+              "w": 5,
+              "h": 2,
+              "variant": "muted"
+            },
+            {
+              "id": "l1",
+              "label": "lowerdir: camada 1",
+              "sub": "base Debian (RO)",
+              "x": 6.7,
+              "y": 7.5,
+              "w": 5,
+              "h": 2,
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "u",
+              "to": "m",
+              "label": "escritas",
+              "accent": true
+            },
+            {
+              "from": "l2",
+              "to": "m",
+              "label": "leituras"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Container",
+              "x": 0,
+              "y": 4.3,
+              "w": 6,
+              "h": 2.9,
+              "labelAt": "bottom"
+            },
+            {
+              "label": "Imagem (compartilhada)",
+              "x": 6.4,
+              "y": 4.3,
+              "w": 5.6,
+              "h": 5.8,
+              "labelAt": "bottom"
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ mount -t overlay overlay \\\n    -o lowerdir=/camadas/2:/camadas/1,upperdir=/c/upper,workdir=/c/work \\\n    /c/merged\n$ docker inspect -f '{{json .GraphDriver.Data}}' web | head -c 300\n{\"LowerDir\":\"/var/lib/docker/overlay2/ab12...-init/diff:/var/lib/docker/...\",\n \"MergedDir\":\"/var/lib/docker/overlay2/ab12.../merged\",\n \"UpperDir\":\"/var/lib/docker/overlay2/ab12.../diff\",\n \"WorkDir\":\"/var/lib/docker/overlay2/ab12.../work\"}"
+        },
+        {
+          "type": "h",
+          "text": "Copy-on-write e _whiteouts_"
+        },
+        {
+          "type": "p",
+          "text": "Quando o container **altera** um arquivo que está num lowerdir, o overlayfs primeiro o **copia** inteiro para o upperdir (_copy-up_) e então modifica a cópia. Mudar 1 byte de um arquivo de 1 GB copia 1 GB. Para **apagar** um arquivo de um lowerdir, o kernel não pode alterar a camada; cria no upperdir um _whiteout_ (um character device 0/0 com o mesmo nome) que esconde o original."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Por isso um `RUN rm -rf /var/cache/...` num `RUN` **posterior** não reduz a imagem: os bytes continuam na camada anterior, apenas escondidos por um whiteout. Remova arquivos temporários no mesmo `RUN` que os criou. A Parte 2 mostra isso com BuildKit.",
+          "title": "Apagar depois não encolhe a imagem"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Dados que mudam muito (bancos, logs, uploads) não pertencem ao upperdir: copy-up é caro, o desempenho é pior que o do disco nativo e tudo some com o container. Use volumes (Parte 2).",
+          "title": "Escrita pesada"
+        }
+      ]
+    },
+    {
+      "id": "privilegios",
+      "title": "Privilégios: capabilities, seccomp e LSMs",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Mesmo isolado, o processo pode ser `root` (UID 0) e, historicamente, root significava poder tudo. O Linux dividiu esse poder em ~40 **capabilities** (`CAP_NET_ADMIN`, `CAP_SYS_TIME`, `CAP_CHOWN`...). Runtimes iniciam containers com um conjunto reduzido (Docker concede ~14, como `CHOWN`, `NET_BIND_SERVICE`, `SETUID`) e removem o resto, incluindo `SYS_ADMIN`."
+        },
+        {
+          "type": "p",
+          "text": "O **seccomp-bpf** é um filtro de chamadas de sistema: o perfil padrão do Docker/containerd bloqueia dezenas das ~350 syscalls (`mount`, `reboot`, `kexec_load`, `bpf` sem privilégio...), reduzindo a superfície do kernel exposta. **AppArmor** ou **SELinux** acrescentam controle obrigatório (MAC) por caminho ou rótulo."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Mecanismo",
+            "Restringe",
+            "Padrão em containers"
+          ],
+          "rows": [
+            [
+              "Capabilities",
+              "Operações privilegiadas do root",
+              "Conjunto reduzido, o resto removido"
+            ],
+            [
+              "seccomp",
+              "Quais syscalls podem ser chamadas",
+              "Perfil default bloqueia as mais perigosas"
+            ],
+            [
+              "AppArmor / SELinux",
+              "Acesso a arquivos, rede, processos",
+              "Perfil `docker-default` / rótulos `container_t`"
+            ],
+            [
+              "User namespace",
+              "Mapeia root do container para UID comum",
+              "Opt-in (rootless, `userns-remap`)"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "`--privileged` desliga quase todas essas barreiras: devolve todas as capabilities, libera dispositivos do host e remove seccomp. Equivale a dar root na máquina. Evite; quando precisar de algo específico, conceda só a capability necessária com `--cap-add`.",
+          "title": "Cuidado com --privileged"
+        },
+        {
+          "type": "p",
+          "text": "A Parte 2 detalha rootless, usuário não-root, `--cap-drop=ALL` e verificação de imagens. Aqui basta fixar a ideia: **isolamento são camadas de defesa independentes**, e nenhuma é perfeita sozinha."
+        }
+      ]
+    },
+    {
+      "id": "imagens",
+      "title": "Imagens e o padrão OCI",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Uma **imagem** é um pacote imutável: o sistema de arquivos (em camadas) mais metadados de como executá-lo. O formato é definido pela **Open Container Initiative (OCI)**, o que faz uma imagem construída com Docker rodar em Podman, containerd ou Kubernetes sem conversão. A OCI mantém três especificações: **image-spec**, **runtime-spec** e **distribution-spec** (o protocolo de registries)."
+        },
+        {
+          "type": "p",
+          "text": "Uma imagem é composta de três tipos de objeto, todos **endereçados por conteúdo**: cada um é identificado pelo `sha256` de seus bytes (o _digest_), então o nome *é* a verificação de integridade."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Manifest**: JSON que aponta para a config e para a lista ordenada de camadas, com `mediaType`, `digest` e `size` de cada uma.",
+            "**Config**: JSON com arquitetura, SO, `Entrypoint`, `Cmd`, `Env`, `ExposedPorts`, usuário, histórico e a lista de `diff_ids` (hash das camadas descomprimidas).",
+            "**Camadas**: tarballs (`tar+gzip` ou `tar+zstd`) com os arquivos adicionados, alterados ou removidos (_whiteouts_) por cada passo do build."
+          ]
+        },
+        {
+          "type": "diagram",
+          "title": "Anatomia de uma imagem OCI",
+          "caption": "Tag aponta para um index (multi-arquitetura), que aponta para um manifest por plataforma, que aponta para config e camadas. Todas as setas são digests sha256. Camadas iguais entre imagens são armazenadas e baixadas uma só vez.",
+          "cols": 12,
+          "rows": 10,
+          "nodes": [
+            {
+              "id": "ix",
+              "label": "Image index",
+              "sub": "nginx:latest",
+              "x": 3.2,
+              "y": 0.3,
+              "w": 5.6,
+              "h": 1.8,
+              "variant": "muted"
+            },
+            {
+              "id": "mf",
+              "label": "Manifest",
+              "sub": "linux/amd64",
+              "x": 3.2,
+              "y": 4.1,
+              "w": 5.6,
+              "h": 1.8,
+              "variant": "accent"
+            },
+            {
+              "id": "cf",
+              "label": "Config",
+              "sub": "JSON, env, cmd",
+              "x": 0,
+              "y": 8,
+              "w": 3.6,
+              "h": 1.8
+            },
+            {
+              "id": "l1",
+              "label": "Camada 1",
+              "sub": "tar+gzip",
+              "x": 4.2,
+              "y": 8,
+              "w": 3.6,
+              "h": 1.8,
+              "variant": "muted"
+            },
+            {
+              "id": "l2",
+              "label": "Camada 2",
+              "sub": "tar+gzip",
+              "x": 8.4,
+              "y": 8,
+              "w": 3.6,
+              "h": 1.8,
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "ix",
+              "to": "mf",
+              "label": "escolhe plataforma"
+            },
+            {
+              "from": "mf",
+              "to": "cf"
+            },
+            {
+              "from": "mf",
+              "to": "l1"
+            },
+            {
+              "from": "mf",
+              "to": "l2"
+            }
+          ],
+          "groups": []
+        },
+        {
+          "type": "p",
+          "text": "Veja o manifest real (aqui via `crane`, da Google; `docker manifest inspect` e `skopeo inspect --raw` mostram o mesmo):"
+        },
+        {
+          "type": "code",
+          "lang": "json",
+          "code": "$ crane manifest nginx:1.27 | jq\n{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n  \"manifests\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:9c3f...e1a0\",\n      \"size\": 1778,\n      \"platform\": { \"architecture\": \"amd64\", \"os\": \"linux\" }\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:41b7...77d2\",\n      \"size\": 1778,\n      \"platform\": { \"architecture\": \"arm64\", \"os\": \"linux\", \"variant\": \"v8\" }\n    }\n  ]\n}"
+        },
+        {
+          "type": "code",
+          "lang": "json",
+          "code": "$ crane manifest nginx@sha256:9c3f...e1a0 | jq\n{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n  \"config\": {\n    \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n    \"digest\": \"sha256:7d2a...c9b1\",\n    \"size\": 7916\n  },\n  \"layers\": [\n    { \"mediaType\": \"application/vnd.oci.image.layer.v1.tar+gzip\",\n      \"digest\": \"sha256:a480...3f5e\", \"size\": 29150000 },\n    { \"mediaType\": \"application/vnd.oci.image.layer.v1.tar+gzip\",\n      \"digest\": \"sha256:5c91...0b44\", \"size\": 43200000 }\n  ]\n}"
+        },
+        {
+          "type": "p",
+          "text": "Os digests acima estão abreviados e os tamanhos são ilustrativos. Na máquina local, `docker image inspect` mostra a config e as camadas já descomprimidas:"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ docker image inspect nginx:1.27 \\\n    --format '{{.Architecture}} {{json .Config.Cmd}} {{len .RootFS.Layers}}'\namd64 [\"nginx\",\"-g\",\"daemon off;\"] 7\n$ docker image inspect nginx:1.27 -f '{{json .RootFS.Layers}}' | jq -r '.[0]'\nsha256:b2e8...a913"
+        },
+        {
+          "type": "h",
+          "text": "Imagem versus container"
+        },
+        {
+          "type": "p",
+          "text": "A relação é a de **classe e instância**, ou de receita e prato. A imagem é somente leitura e pode originar quantos containers quiser. Um **container** é a imagem (lowerdirs) + uma camada gravável fina (upperdir) + um conjunto de namespaces/cgroups + um processo em execução. Apagar o container descarta o upperdir; a imagem permanece."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "",
+            "Imagem",
+            "Container"
+          ],
+          "rows": [
+            [
+              "Natureza",
+              "Artefato imutável, endereçado por digest",
+              "Instância em execução (ou parada)"
+            ],
+            [
+              "Armazenamento",
+              "Camadas RO compartilhadas",
+              "Camadas RO + camada RW exclusiva"
+            ],
+            [
+              "Ciclo de vida",
+              "Construída uma vez, distribuída",
+              "Criado, iniciado, parado, removido"
+            ],
+            [
+              "Identificação",
+              "`repo:tag` ou `repo@sha256:...`",
+              "ID de 64 hex / nome aleatório"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "A **tag** (`nginx:1.27`, `latest`) é só um ponteiro mutável para um digest. Só o digest garante que você roda exatamente os mesmos bytes. Tags, digests e registries são o tema da Parte 2.",
+          "title": "Tag não é identidade"
+        }
+      ]
+    },
+    {
+      "id": "runtimes",
+      "title": "A pilha de runtimes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Quando você digita `docker run`, não é o CLI que cria o container. Ele é o primeiro de uma cadeia de componentes, cada um com uma responsabilidade estreita — e essa separação é o que permitiu que Kubernetes e Docker compartilhassem as peças de baixo."
+        },
+        {
+          "type": "diagram",
+          "title": "Do docker CLI ao processo",
+          "caption": "O runc cria o container e termina; o shim permanece como pai do processo, mantendo stdio e coletando o exit code mesmo se o containerd reiniciar.",
+          "cols": 12,
+          "rows": 20.2,
+          "nodes": [
+            {
+              "id": "cli",
+              "label": "docker CLI",
+              "sub": "cliente",
+              "x": 2.5,
+              "y": 0.3,
+              "w": 7,
+              "h": 1.8
+            },
+            {
+              "id": "dd",
+              "label": "dockerd",
+              "sub": "API, build, redes",
+              "x": 2.5,
+              "y": 3.9,
+              "w": 7,
+              "h": 1.8
+            },
+            {
+              "id": "cd",
+              "label": "containerd",
+              "sub": "imagens e ciclo de vida",
+              "x": 2.5,
+              "y": 7.5,
+              "w": 7,
+              "h": 1.8,
+              "variant": "accent"
+            },
+            {
+              "id": "sh",
+              "label": "containerd-shim",
+              "sub": "um por container",
+              "x": 2.5,
+              "y": 11.1,
+              "w": 7,
+              "h": 1.8
+            },
+            {
+              "id": "rc",
+              "label": "runc",
+              "sub": "runtime OCI low-level",
+              "x": 2.5,
+              "y": 14.7,
+              "w": 7,
+              "h": 1.8
+            },
+            {
+              "id": "pr",
+              "label": "processo do container",
+              "sub": "PID 1 nos namespaces",
+              "x": 2.5,
+              "y": 18.3,
+              "w": 7,
+              "h": 1.8,
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "cli",
+              "to": "dd",
+              "label": "REST via docker.sock"
+            },
+            {
+              "from": "dd",
+              "to": "cd",
+              "label": "gRPC"
+            },
+            {
+              "from": "cd",
+              "to": "sh",
+              "label": "ttrpc"
+            },
+            {
+              "from": "sh",
+              "to": "rc",
+              "label": "config.json (OCI)",
+              "accent": true
+            },
+            {
+              "from": "rc",
+              "to": "pr",
+              "label": "clone + exec"
+            }
+          ],
+          "groups": []
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Camada",
+            "Função",
+            "Observação"
+          ],
+          "rows": [
+            [
+              "docker CLI",
+              "Interface de linha de comando",
+              "Fala com a API HTTP do daemon"
+            ],
+            [
+              "dockerd",
+              "Build, redes, volumes, API REST",
+              "Delega execução ao containerd"
+            ],
+            [
+              "containerd",
+              "Pull, armazenamento, snapshots, ciclo de vida",
+              "Daemon de nível industrial; usado diretamente pelo Kubernetes via CRI"
+            ],
+            [
+              "containerd-shim-runc-v2",
+              "Pai do processo; stdio, exit code",
+              "Permite reiniciar o containerd sem matar containers"
+            ],
+            [
+              "runc",
+              "Cria o container a partir do bundle OCI",
+              "Escrito em Go; executa e termina"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O contrato entre o containerd e o runc é a **runtime-spec** OCI: um _bundle_ com o `rootfs/` e um `config.json` descrevendo processo, namespaces, mounts, cgroups, capabilities e seccomp. O runc é, essencialmente, um interpretador desse arquivo:"
+        },
+        {
+          "type": "code",
+          "lang": "json",
+          "code": "{\n  \"ociVersion\": \"1.2.0\",\n  \"process\": {\n    \"args\": [\"nginx\", \"-g\", \"daemon off;\"],\n    \"cwd\": \"/\",\n    \"capabilities\": { \"bounding\": [\"CAP_CHOWN\", \"CAP_NET_BIND_SERVICE\"] },\n    \"noNewPrivileges\": true\n  },\n  \"root\": { \"path\": \"rootfs\", \"readonly\": false },\n  \"linux\": {\n    \"namespaces\": [\n      {\"type\": \"pid\"}, {\"type\": \"network\"}, {\"type\": \"ipc\"},\n      {\"type\": \"uts\"}, {\"type\": \"mount\"}, {\"type\": \"cgroup\"}\n    ],\n    \"resources\": { \"memory\": { \"limit\": 67108864 } }\n  }\n}",
+          "file": "config.json"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ mkdir -p bundle/rootfs && cd bundle\n$ docker export $(docker create alpine) | tar -C rootfs -xf -\n$ runc spec                  # gera config.json padrão\n$ sudo runc run meu-container   # roda sem Docker nem containerd\n/ # hostname\nrunc"
+        },
+        {
+          "type": "h",
+          "text": "Alternativas e variantes"
+        },
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "Podman",
+              "def": "Engine da Red Hat compatível com a CLI do Docker, **sem daemon** (cada comando é um processo, via `conmon`) e com foco em **rootless** por padrão. Entende pods e gera unidades systemd (Quadlet)."
+            },
+            {
+              "term": "CRI-O",
+              "def": "Runtime feito só para Kubernetes (implementa a CRI e nada mais). Usa runc ou crun por baixo."
+            },
+            {
+              "term": "crun",
+              "def": "Runtime OCI escrito em C, mais leve e rápido que o runc; padrão no Podman em muitas distribuições."
+            },
+            {
+              "term": "gVisor (runsc)",
+              "def": "Intercepta syscalls num kernel reimplementado em espaço de usuário (Sentry). Menos superfície do kernel real, ao custo de desempenho em I/O e syscalls."
+            },
+            {
+              "term": "Kata Containers",
+              "def": "Roda cada container (ou pod) numa microVM leve com kernel próprio, mantendo a interface OCI. Isolamento de VM com ergonomia de container."
+            },
+            {
+              "term": "Firecracker",
+              "def": "Monitor de microVMs (KVM) da AWS, base de Lambda e Fargate; boot em ~125 ms."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Todos os runtimes acima aceitam o mesmo `config.json`; trocar de um para outro é questão de configuração (`--runtime=runsc`, `RuntimeClass` no Kubernetes). É a prova prática do valor do padrão OCI.",
+          "title": "Intercambiáveis"
+        }
+      ]
+    },
+    {
+      "id": "ciclo",
+      "title": "O que acontece em docker run nginx",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Juntando todas as peças, eis a sequência real quando você executa o comando num host sem a imagem:"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "CLI → daemon",
+              "text": "O `docker` envia `POST /containers/create` e depois `/start` ao `dockerd` pelo socket Unix `/var/run/docker.sock`."
+            },
+            {
+              "title": "Pull da imagem",
+              "text": "Como `nginx:latest` não existe localmente, o containerd consulta o registry: baixa o index, escolhe o manifest da plataforma (amd64/arm64), baixa a config e as camadas **em paralelo**, verificando cada `sha256`."
+            },
+            {
+              "title": "Unpack e snapshot",
+              "text": "Cada camada é descomprimida e vira um _snapshot_ overlayfs encadeado (`/var/lib/containerd`, ou `/var/lib/docker/overlay2`). Camadas já presentes são reaproveitadas."
+            },
+            {
+              "title": "Criação do container",
+              "text": "O daemon monta um snapshot gravável (upperdir) sobre a imagem, mescla a config da imagem com as flags do `run` (`-p`, `-e`, `--memory`) e gera o `config.json` OCI."
+            },
+            {
+              "title": "Shim e runc",
+              "text": "O containerd inicia o `containerd-shim-runc-v2`, que invoca `runc create`: ele faz `clone()` com os flags de namespace, configura cgroups, rede (veth), `pivot_root`, descarta capabilities e instala o filtro seccomp."
+            },
+            {
+              "title": "exec do PID 1",
+              "text": "O runc faz `execve` do `Entrypoint + Cmd` (`nginx -g 'daemon off;'`) e sai. O nginx passa a ser o **PID 1** do namespace; o shim vira seu pai."
+            },
+            {
+              "title": "Execução e saída",
+              "text": "O shim encaminha stdout/stderr para o driver de log. Quando o PID 1 termina, o shim registra o exit code, o containerd notifica o daemon e o container fica `Exited`."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ docker events --filter type=container &\n$ docker run -d --name web -p 8080:80 nginx\n... image pull nginx:latest\n... container create  (image=nginx, name=web)\n... network connect   (bridge)\n... container start\n$ docker top web        # processos vistos do host\nUID   PID    PPID   CMD\nroot  48213  48190  nginx: master process nginx -g daemon off;\n101   48260  48213  nginx: worker process"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Reexecutar `docker run` com a imagem já local pula as etapas 2 e 3: só restam criar snapshot e iniciar o processo. Por isso o segundo start é quase instantâneo.",
+          "title": "Por que o 2º run é rápido"
+        }
+      ]
+    },
+    {
+      "id": "pid1",
+      "title": "PID 1: sinais e processos zumbis",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Dentro do container, o processo principal é o **PID 1** — e o kernel o trata de forma especial por duas razões que causam bugs reais:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Sinais sem handler são ignorados.** Para o PID 1, um sinal cujo handler não foi registrado explicitamente (inclusive `SIGTERM` e `SIGINT`) é descartado, em vez de executar a ação padrão de encerrar. Se sua aplicação não instala um handler, `docker stop` envia `SIGTERM`, nada acontece, e após 10 s o daemon manda `SIGKILL`.",
+            "**Reaping de órfãos.** Quando um processo morre, seus filhos são adotados pelo PID 1 do namespace. Se ele não chama `wait()`, os filhos terminados viram **zumbis** (`<defunct>`) que ocupam entradas na tabela de processos até esgotá-la."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Por isso o _shell form_ também é problema: `CMD npm start` vira `/bin/sh -c \"npm start\"`, o `sh` é o PID 1 e **não repassa sinais** ao filho. A forma _exec_ (`CMD [\"node\", \"server.js\"]`) faz o seu programa ser o PID 1 diretamente."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# problemático: sh vira PID 1 e engole o SIGTERM\nCMD npm start\n\n# correto: seu processo é o PID 1 e recebe os sinais\nCMD [\"node\", \"server.js\"]\n\n# se precisar de um init: reaping + repasse de sinais\nENTRYPOINT [\"/usr/bin/tini\", \"--\"]\nCMD [\"node\", \"server.js\"]",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ docker run --rm -d --init --name t alpine sleep 300\n$ docker exec t ps\nPID   USER     COMMAND\n    1 root     /sbin/docker-init -- sleep 300\n    7 root     sleep 300\n$ time docker stop t     # SIGTERM é entregue e tratado"
+        },
+        {
+          "type": "p",
+          "text": "`--init` (Docker) / `--init` (Podman) injeta o **tini**, um init minúsculo que repassa sinais e colhe zumbis. No Kubernetes o equivalente é `shareProcessNamespace` ou embutir o tini na imagem. Aplicações em Go, Node e Python que lançam subprocessos (workers, `git`, `ffmpeg`) são as candidatas clássicas a gerar zumbis."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Graceful shutdown depende do processo tratar `SIGTERM`: parar de aceitar conexões, terminar requisições em voo, fechar conexões com o banco. O prazo padrão é 10 s no Docker (`--stop-timeout`) e 30 s no Kubernetes (`terminationGracePeriodSeconds`); depois vem `SIGKILL`, sem cerimônia.",
+          "title": "Encerramento limpo"
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Por quê",
+            "Como evitar"
+          ],
+          "rows": [
+            [
+              "\"Container é uma VM leve\"",
+              "Compartilha o kernel do host; um exploit de kernel afeta todos",
+              "Trate como isolamento de processos; use gVisor/Kata para código não confiável"
+            ],
+            [
+              "Dados gravados dentro do container",
+              "O upperdir some com `docker rm`",
+              "Use volumes para tudo que precisa persistir"
+            ],
+            [
+              "Apagar arquivos em `RUN` posterior",
+              "Whiteout esconde, mas a camada antiga mantém os bytes",
+              "Limpe no mesmo `RUN` que criou os arquivos"
+            ],
+            [
+              "Aplicação lê CPUs/memória do host",
+              "O processo vê o hardware real em `/proc`, não o cgroup",
+              "Use runtimes cientes de cgroup e ajuste `GOMAXPROCS`/heap"
+            ],
+            [
+              "Exit code 137 sem log de erro",
+              "OOM killer enviou `SIGKILL`",
+              "Cheque `docker inspect` (`OOMKilled`), aumente o limite ou corrija o vazamento"
+            ],
+            [
+              "`CMD` em shell form",
+              "`sh` vira PID 1 e não repassa `SIGTERM`",
+              "Use a forma exec (JSON) ou `--init`"
+            ],
+            [
+              "`--privileged` para \"fazer funcionar\"",
+              "Remove capabilities drop, seccomp e acesso a devices",
+              "Descubra a capability mínima e use `--cap-add`"
+            ],
+            [
+              "Confiar em `latest`",
+              "Tag mutável; deploys não reprodutíveis",
+              "Fixe versão e, em produção, o digest"
+            ],
+            [
+              "Rodar a aplicação como root",
+              "Root do container é root no host sem userns",
+              "Crie e use um usuário não-root (Parte 2)"
+            ],
+            [
+              "Esperar mesmo kernel em todo lugar",
+              "Containers Linux usam o kernel do host; no macOS/Windows há uma VM Linux por baixo",
+              "Teste em Linux real; atenção a features de kernel e arquitetura (amd64 vs arm64)"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "No macOS e no Windows, Docker Desktop, Podman Machine e Rancher Desktop rodam uma VM Linux leve e os containers vivem dentro dela. Por isso bind mounts do host têm desempenho de I/O pior e `--network=host` não se comporta como no Linux.",
+          "title": "Containers no desktop"
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "Namespace",
+              "def": "Mecanismo do kernel que dá a um grupo de processos uma visão própria de um recurso global (PIDs, rede, montagens...)."
+            },
+            {
+              "term": "cgroup",
+              "def": "Grupo de controle: hierarquia usada para contabilizar e limitar CPU, memória, I/O e processos."
+            },
+            {
+              "term": "OOM killer",
+              "def": "Componente do kernel que mata processos quando a memória se esgota (ou o limite do cgroup é atingido)."
+            },
+            {
+              "term": "OverlayFS",
+              "def": "Sistema de arquivos de união que empilha lowerdirs somente leitura sob um upperdir gravável."
+            },
+            {
+              "term": "Copy-on-write",
+              "def": "Estratégia em que a cópia de um dado só acontece quando alguém tenta modificá-lo."
+            },
+            {
+              "term": "Whiteout",
+              "def": "Marca no upperdir que oculta um arquivo existente numa camada inferior."
+            },
+            {
+              "term": "OCI",
+              "def": "Open Container Initiative: especificações abertas de imagem, runtime e distribuição."
+            },
+            {
+              "term": "Manifest",
+              "def": "JSON que lista a config e as camadas de uma imagem com seus digests."
+            },
+            {
+              "term": "Digest",
+              "def": "Hash `sha256` do conteúdo; identificador imutável de um objeto da imagem."
+            },
+            {
+              "term": "Image index",
+              "def": "Manifest de manifests: aponta uma imagem por plataforma (multi-arch)."
+            },
+            {
+              "term": "Camada (layer)",
+              "def": "Tarball com as mudanças de um passo do build, aplicada sobre as camadas anteriores."
+            },
+            {
+              "term": "runc",
+              "def": "Implementação de referência do runtime-spec OCI; cria o container no kernel."
+            },
+            {
+              "term": "containerd",
+              "def": "Daemon que gerencia imagens, snapshots e o ciclo de vida de containers; base do Docker e do Kubernetes."
+            },
+            {
+              "term": "shim",
+              "def": "Processo leve que fica como pai do container, desacoplando-o do ciclo de vida do daemon."
+            },
+            {
+              "term": "Capability",
+              "def": "Fração dos privilégios de root que pode ser concedida ou removida individualmente."
+            },
+            {
+              "term": "seccomp",
+              "def": "Filtro que restringe quais chamadas de sistema um processo pode fazer."
+            },
+            {
+              "term": "Rootless",
+              "def": "Executar o engine e os containers sem privilégios de root, via user namespaces."
+            },
+            {
+              "term": "PID 1",
+              "def": "Primeiro processo de um PID namespace: recebe tratamento especial para sinais e adoção de órfãos."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Você já sabe o que acontece por baixo: processo + namespaces + cgroups + overlayfs + config OCI. Na **Containers 2** a conversa passa a ser prática: escrever bons Dockerfiles, entender BuildKit e cache, tags versus digests, redes e portas, volumes, limites de recursos, segurança (rootless, não-root, assinatura), Compose e depuração."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Experimente: rode `unshare --pid --fork --mount-proc` e compare `ls -l /proc/self/ns` dentro e fora.",
+            "Experimente: suba um container com `--memory=32m` e provoque um OOM; leia `memory.events`.",
+            "Depois, siga para a série **Kubernetes**, que usa exatamente containerd e runc nos nós, orquestrados por um control plane."
+          ]
+        }
+      ]
+    }
+  ]
+}

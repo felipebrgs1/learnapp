@@ -1,0 +1,1869 @@
+{
+  "id": "containers-2",
+  "title": "Containers 2 — Imagens, rede e segurança na prática",
+  "summary": "Do docker run ao Compose: construir imagens enxutas e cacheáveis, entender rede e volumes, limitar recursos e endurecer a segurança antes de ir para o Kubernetes.",
+  "category": "Infraestrutura",
+  "level": "Iniciante",
+  "minutes": 38,
+  "updated": "out 2026",
+  "tags": [
+    "docker",
+    "dockerfile",
+    "containers",
+    "contêineres",
+    "compose",
+    "docker compose",
+    "buildkit",
+    "buildx",
+    "podman",
+    "registry",
+    "imagem",
+    "volume",
+    "rede",
+    "multi-stage",
+    "trivy",
+    "cosign"
+  ],
+  "series": "Containers",
+  "part": 2,
+  "sections": [
+    {
+      "id": "visao-geral",
+      "title": "Do mecanismo à prática: o CLI essencial",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Na Parte 1 você viu **o que é** um container: um processo comum do Linux isolado por namespaces, limitado por cgroups e enxergando um sistema de arquivos montado em camadas. Aqui o foco é o dia a dia: construir imagens boas, ligá-las em rede, guardar dados, limitar recursos, proteger e depurar."
+        },
+        {
+          "type": "p",
+          "text": "Os exemplos usam o CLI `docker`, mas quase tudo vale igual para o **Podman** (`alias docker=podman` resolve a maioria dos casos) e para qualquer runtime que fale OCI. O Docker Engine moderno usa **BuildKit** como construtor padrão (desde a versão 23) e o **Compose v2** como plugin (`docker compose`)."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "O construtor antigo (\"legacy builder\", `DOCKER_BUILDKIT=0`) está obsoleto e o binário Python `docker-compose` (v1) chegou ao fim de vida em 2023 e saiu do Docker Desktop. Tutoriais com `docker-compose up` e `version: \"3\"` no topo do arquivo são dessa era: hoje use `docker compose` e `compose.yaml` sem a chave `version`.",
+          "title": "O que ficou para trás"
+        },
+        {
+          "type": "p",
+          "text": "O fluxo mental que organiza o guia inteiro:"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Escrever",
+              "text": "O Dockerfile descreve como montar o sistema de arquivos da imagem, camada por camada."
+            },
+            {
+              "title": "Construir",
+              "text": "`docker build` executa as instruções com cache e produz uma imagem identificada por um digest."
+            },
+            {
+              "title": "Publicar",
+              "text": "`docker push` envia as camadas para um registry, com uma tag legível e um digest imutável."
+            },
+            {
+              "title": "Rodar",
+              "text": "`docker run` cria um container: camada gravável por cima da imagem, rede, volumes e limites."
+            },
+            {
+              "title": "Operar",
+              "text": "Logs, métricas, exec e depuração, sempre pensando que o container é descartável."
+            }
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Um container passa por estados simples: **created**, **running**, **paused**, **exited**. `docker run` é atalho para `docker create` + `docker start`, e o container continua existindo (parado) depois que o processo principal termina, até você removê-lo."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# servidor web em segundo plano, porta 8080 do host -> 80\ndocker run -d --name web -p 8080:80 nginx:1.27\n\n# shell interativo descartável (--rm remove ao sair)\ndocker run -it --rm alpine:3.20 sh\n\ndocker ps            # em execução (-a inclui os parados)\ndocker logs -f web   # segue a saída (stdout/stderr)\ndocker exec -it web sh\ndocker stop web      # SIGTERM, espera, depois SIGKILL\ndocker rm web"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Comando",
+            "O que faz",
+            "Detalhe que importa"
+          ],
+          "rows": [
+            [
+              "`run -d`",
+              "Cria e inicia em segundo plano",
+              "Imprime o ID; o processo principal define a vida do container"
+            ],
+            [
+              "`run -it`",
+              "Anexa terminal interativo (`-i` stdin, `-t` TTY)",
+              "Use em conjunto para shells; sem `-t` a saída fica sem formatação"
+            ],
+            [
+              "`run --rm`",
+              "Remove o container ao terminar",
+              "Evita acúmulo de containers parados em tarefas pontuais"
+            ],
+            [
+              "`ps -a`",
+              "Lista containers",
+              "Mostra também os `Exited`, com o código de saída"
+            ],
+            [
+              "`logs -f --tail 100`",
+              "Segue as últimas linhas",
+              "Só captura stdout/stderr do processo principal"
+            ],
+            [
+              "`exec`",
+              "Roda outro processo dentro do container",
+              "Entra nos mesmos namespaces; não inicia um novo container"
+            ],
+            [
+              "`stop`",
+              "SIGTERM, 10 s, depois SIGKILL",
+              "Ajuste com `-t`; o app precisa tratar SIGTERM"
+            ],
+            [
+              "`kill`",
+              "SIGKILL por padrão (`-s` muda o sinal)",
+              "Sem desligamento limpo; útil para travados"
+            ],
+            [
+              "`rm -f`",
+              "Mata e remove",
+              "Dados na camada gravável se perdem"
+            ],
+            [
+              "`images` / `rmi`",
+              "Lista e remove imagens",
+              "Camadas compartilhadas só saem quando nenhuma imagem as usa"
+            ],
+            [
+              "`system prune`",
+              "Remove parados, redes e imagens órfãs",
+              "`-a` apaga qualquer imagem sem container; `--volumes` apaga volumes"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "`docker stop` envia **SIGTERM** ao PID 1 do container e, se ele não sair em 10 segundos, envia **SIGKILL** (que o kernel entrega sem chance de o processo reagir). Por isso o código de saída 143 significa \"terminou por SIGTERM\" e 137 significa \"morto por SIGKILL\" (128 + número do sinal). Um app que ignora SIGTERM sempre custa 10 s no stop; a causa clássica é o PID 1 ser um shell que não repassa sinais (veja ENTRYPOINT e CMD adiante)."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker stop -t 30 web            # dá 30 s para drenar conexões\ndocker kill -s HUP web           # sinal arbitrário (recarregar config)\ndocker inspect -f '{{.State.ExitCode}}' web"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Para limpar com segurança use `docker container prune` e `docker image prune` separadamente. `docker system prune -a --volumes` é o botão nuclear: confirme o que será removido antes, principalmente em máquina com bancos de dados locais em volumes.",
+          "title": "Limpeza"
+        }
+      ]
+    },
+    {
+      "id": "dockerfile",
+      "title": "Dockerfile em profundidade",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Cada instrução que altera arquivos (`RUN`, `COPY`, `ADD`) gera uma **camada** (Parte 1). O Dockerfile é uma receita determinística: o mesmo contexto e a mesma base devem produzir a mesma imagem. Um exemplo completo para uma API Node, que vamos dissecar:"
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# syntax=docker/dockerfile:1\nFROM node:22-slim\n\nWORKDIR /app\nENV NODE_ENV=production\n\nCOPY package.json package-lock.json ./\nRUN npm ci --omit=dev\n\nCOPY . .\n\nUSER node\nEXPOSE 3000\nHEALTHCHECK --interval=30s --timeout=3s \\\n  CMD node healthcheck.js || exit 1\n\nENTRYPOINT [\"node\"]\nCMD [\"server.js\"]",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "FROM",
+              "def": "Define a imagem base e abre um estágio. Todo Dockerfile começa por ela (ou por `scratch`, a imagem vazia). Prefira tag versionada, idealmente com digest."
+            },
+            {
+              "term": "RUN",
+              "def": "Executa um comando em tempo de build e grava o resultado como camada. Encadeie com `&&` e limpe caches na **mesma** instrução; arquivos apagados numa camada posterior continuam ocupando espaço na anterior."
+            },
+            {
+              "term": "COPY",
+              "def": "Copia arquivos do contexto de build para a imagem. Aceita `--chown=user:group`, `--chmod` e `--from=<estágio>`. É a escolha padrão."
+            },
+            {
+              "term": "ADD",
+              "def": "Faz o que `COPY` faz e ainda baixa URLs e extrai tarballs locais. Esse comportamento implícito surpreende; use só para extrair um `.tar` local. Para URLs prefira `curl` num `RUN` com checagem de hash (ou `ADD --checksum`)."
+            },
+            {
+              "term": "WORKDIR",
+              "def": "Define (e cria) o diretório de trabalho para as instruções seguintes e para o processo final. Use no lugar de `RUN cd`."
+            },
+            {
+              "term": "ENV",
+              "def": "Variável presente no build **e** no container em execução. Fica visível em `docker inspect`."
+            },
+            {
+              "term": "ARG",
+              "def": "Variável só de build, definida com `--build-arg`. Não existe em runtime, mas **aparece em `docker history`**: nunca coloque segredos nela."
+            },
+            {
+              "term": "USER",
+              "def": "Troca o usuário das instruções seguintes e do processo final. Sem ela, tudo roda como root."
+            },
+            {
+              "term": "EXPOSE",
+              "def": "Apenas **documentação**: registra a porta na metadata. Não publica nada; quem abre a porta no host é `-p` (ou `-P`, que publica todas as `EXPOSE`)."
+            },
+            {
+              "term": "HEALTHCHECK",
+              "def": "Comando que o Docker executa periodicamente; o resultado vira `healthy` ou `unhealthy` em `docker ps`. Fala só com o Docker e o Compose."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "O Kubernetes **ignora** `HEALTHCHECK` e `EXPOSE`. Lá, saúde é definida por probes (liveness, readiness, startup) no manifesto, e portas por `containerPort` e Services. Vale escrever o `HEALTHCHECK` para Compose e Swarm, mas não conte com ele no cluster.",
+          "title": "Atenção para o futuro"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "ARG",
+            "ENV"
+          ],
+          "rows": [
+            [
+              "Disponível no build",
+              "Sim, após declarada",
+              "Sim, após declarada"
+            ],
+            [
+              "Disponível no container",
+              "Não",
+              "Sim"
+            ],
+            [
+              "Definição externa",
+              "`--build-arg NOME=valor`",
+              "`-e NOME=valor` no `run`"
+            ],
+            [
+              "Visível na imagem final",
+              "Sim, em `docker history` e na metadata",
+              "Sim, em `docker inspect`"
+            ],
+            [
+              "Uso típico",
+              "Versão de base, versão de ferramenta",
+              "Configuração de runtime, PATH"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Segredos em `ARG`, `ENV` ou `COPY .env` ficam gravados nas camadas para sempre; quem baixar a imagem os extrai com `docker history --no-trunc` ou descompactando as camadas. Use `RUN --mount=type=secret` (seção BuildKit) ou injete em runtime.",
+          "title": "Nunca coloque segredos na imagem"
+        },
+        {
+          "type": "p",
+          "text": "Antes de qualquer instrução, o cliente envia o **contexto de build** (o diretório indicado, normalmente `.`) ao construtor. Sem `.dockerignore`, vão `.git`, `node_modules`, builds anteriores e talvez `.env`. Isso deixa o build lento e, pior, qualquer `COPY . .` os joga dentro da imagem e invalida o cache a cada commit."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": ".git\nnode_modules\ndist\n*.log\n.env\n.env.*\nDockerfile\ncompose.yaml\n**/*.md\n!README.md",
+          "file": ".dockerignore"
+        },
+        {
+          "type": "p",
+          "text": "`ENTRYPOINT` define **o executável** do container; `CMD` define **argumentos padrão** (ou o comando inteiro, se não houver ENTRYPOINT). Em `docker run imagem args...`, os `args` substituem o `CMD`; o `ENTRYPOINT` só é trocado com `--entrypoint`."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "ENTRYPOINT",
+            "CMD",
+            "Comando executado"
+          ],
+          "rows": [
+            [
+              "(nenhum)",
+              "`[\"node\",\"app.js\"]`",
+              "`node app.js`"
+            ],
+            [
+              "`[\"node\"]`",
+              "`[\"app.js\"]`",
+              "`node app.js`; `docker run img outro.js` troca só o argumento"
+            ],
+            [
+              "`[\"node\",\"app.js\"]`",
+              "(nenhum)",
+              "`node app.js`; argumentos do `run` são anexados ao final"
+            ],
+            [
+              "`node app.js` (shell)",
+              "qualquer um",
+              "`/bin/sh -c \"node app.js\"`; o CMD é **ignorado**"
+            ],
+            [
+              "`[\"/entrypoint.sh\"]`",
+              "`[\"serve\"]`",
+              "`/entrypoint.sh serve`; padrão de script de inicialização"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Forma exec versus forma shell"
+        },
+        {
+          "type": "p",
+          "text": "A **forma exec** (`[\"node\", \"app.js\"]`, JSON) executa o binário diretamente: ele vira o PID 1 e recebe os sinais enviados por `docker stop`. A **forma shell** (`node app.js`) executa `/bin/sh -c \"node app.js\"`: o PID 1 é o shell, que normalmente **não repassa SIGTERM** ao filho. Resultado: o `stop` espera 10 s e termina com SIGKILL, sem desligamento limpo."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# ruim: PID 1 = sh, o app nunca vê o SIGTERM\nCMD node server.js\n\n# bom: PID 1 = node\nCMD [\"node\", \"server.js\"]\n\n# se precisar de um script de inicialização, termine com exec\n# entrypoint.sh:\n#   #!/bin/sh\n#   run_migrations\n#   exec \"$@\"      # substitui o shell pelo processo final\nENTRYPOINT [\"/entrypoint.sh\"]\nCMD [\"node\", \"server.js\"]",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Se o app não faz o papel de PID 1 (não colhe processos zumbis nem trata sinais), use `docker run --init` ou, no Compose, `init: true`: o Docker injeta o `tini` como PID 1. Detalhes do porquê estão na Parte 1.",
+          "title": "Quando o app não é um bom PID 1"
+        },
+        {
+          "type": "h",
+          "text": "HEALTHCHECK na prática"
+        },
+        {
+          "type": "p",
+          "text": "O healthcheck roda **dentro** do container, então o binário usado precisa existir na imagem (`curl` não existe em imagens distroless; faça a verificação com o próprio runtime ou um mini binário). O estado muda para `unhealthy` após `--retries` falhas consecutivas e só é consumido pelo Compose (`depends_on: condition: service_healthy`) e por orquestradores que o leem."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "HEALTHCHECK --interval=10s --timeout=2s --start-period=20s \\\n  --retries=3 CMD wget -qO- http://127.0.0.1:3000/health || exit 1",
+          "file": "Dockerfile"
+        }
+      ]
+    },
+    {
+      "id": "cache",
+      "title": "Cache de build e BuildKit",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O BuildKit calcula uma **chave de cache** para cada instrução: o texto da instrução, a camada anterior e, para `COPY`/`ADD`, o **conteúdo** (checksum) dos arquivos copiados. Se a chave bate, a camada é reaproveitada; se não bate, aquela instrução **e todas as seguintes** são reexecutadas. A ordem das instruções é, portanto, uma decisão de desempenho."
+        },
+        {
+          "type": "diagram",
+          "title": "Invalidação em cascata",
+          "cols": 12,
+          "rows": 13.6,
+          "nodes": [
+            {
+              "id": "l1",
+              "label": "FROM node:22-slim",
+              "x": 0.4,
+              "y": 0,
+              "w": 7,
+              "h": 2,
+              "sub": "base",
+              "variant": "muted"
+            },
+            {
+              "id": "l2",
+              "label": "COPY package*.json",
+              "x": 0.4,
+              "y": 2.8,
+              "w": 7,
+              "h": 2,
+              "sub": "só muda com dependências",
+              "variant": "muted"
+            },
+            {
+              "id": "l3",
+              "label": "RUN npm ci",
+              "x": 0.4,
+              "y": 5.6,
+              "w": 7,
+              "h": 2,
+              "sub": "caro · cache hit",
+              "variant": "muted"
+            },
+            {
+              "id": "l4",
+              "label": "COPY . .",
+              "x": 0.4,
+              "y": 8.4,
+              "w": 7,
+              "h": 2,
+              "sub": "muda a cada commit",
+              "variant": "accent"
+            },
+            {
+              "id": "l5",
+              "label": "RUN npm run build",
+              "x": 0.4,
+              "y": 11.2,
+              "w": 7,
+              "h": 2,
+              "sub": "refeito sempre",
+              "variant": "dashed"
+            },
+            {
+              "id": "ed",
+              "label": "edita src/",
+              "x": 8.6,
+              "y": 8.4,
+              "w": 3.4,
+              "h": 2,
+              "sub": "código"
+            }
+          ],
+          "edges": [
+            {
+              "from": "l1",
+              "to": "l2"
+            },
+            {
+              "from": "l2",
+              "to": "l3"
+            },
+            {
+              "from": "l3",
+              "to": "l4"
+            },
+            {
+              "from": "l4",
+              "to": "l5"
+            },
+            {
+              "from": "ed",
+              "to": "l4",
+              "label": "invalida",
+              "accent": true
+            }
+          ],
+          "caption": "Tudo acima de `COPY . .` vem do cache. Se `COPY . .` viesse antes do `npm ci`, qualquer edição reinstalaria as dependências."
+        },
+        {
+          "type": "p",
+          "text": "Por isso a regra de ouro: **copie primeiro os manifestos de dependência** (`package.json` + lockfile, `go.mod` + `go.sum`, `requirements.txt`, `pom.xml`), instale, e só depois copie o código. Dependências mudam raramente; código muda a cada commit."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# lento: cada edição reinstala tudo\nCOPY . .\nRUN npm ci\n\n# rápido: npm ci só roda se o lockfile mudar\nCOPY package.json package-lock.json ./\nRUN npm ci\nCOPY . .",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Instruções que mudam a cada build (data, hash do commit via `ARG`) devem ficar **no fim**.",
+            "Um `RUN apt-get update` isolado fica em cache e instala pacotes velhos; junte `update` e `install` na mesma instrução.",
+            "`--no-cache` ignora o cache; `--pull` força baixar a base de novo.",
+            "Em CI, o cache local some entre jobs: use `--cache-from`/`--cache-to` com `type=registry` ou `type=gha`."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "RUN apt-get update \\\n && apt-get install -y --no-install-recommends curl ca-certificates \\\n && rm -rf /var/lib/apt/lists/*",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "h",
+          "text": "Multi-stage builds"
+        },
+        {
+          "type": "p",
+          "text": "Compilar exige compilador, cabeçalhos e ferramentas; executar não. Num **multi-stage build** você usa vários `FROM` no mesmo arquivo e copia apenas o artefato final de um estágio para outro. Só o último estágio vira a imagem publicada; o resto fica no cache de build e não entra no que será baixado em produção."
+        },
+        {
+          "type": "diagram",
+          "title": "Dois estágios, uma imagem",
+          "cols": 12,
+          "rows": 11.0,
+          "nodes": [
+            {
+              "id": "b",
+              "label": "builder",
+              "x": 3,
+              "y": 1.0,
+              "w": 6,
+              "h": 2,
+              "sub": "SDK + deps · ~1 GB"
+            },
+            {
+              "id": "f",
+              "label": "final",
+              "x": 3,
+              "y": 7.3,
+              "w": 6,
+              "h": 2,
+              "sub": "só o runtime · ~20 MB",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "b",
+              "to": "f",
+              "label": "COPY --from=builder",
+              "accent": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Estágio 1 · descartado",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 3.6
+            },
+            {
+              "label": "Estágio 2 · imagem enviada ao registry",
+              "x": 0,
+              "y": 6.6,
+              "w": 12,
+              "h": 4.0,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "Tamanhos ilustrativos; dependem da linguagem e das dependências."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# syntax=docker/dockerfile:1\nFROM node:22-slim AS build\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nRUN npm run build\n\nFROM node:22-slim AS runtime\nWORKDIR /app\nENV NODE_ENV=production\nCOPY package*.json ./\nRUN npm ci --omit=dev && npm cache clean --force\nCOPY --from=build /app/dist ./dist\nUSER node\nCMD [\"node\", \"dist/server.js\"]",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "p",
+          "text": "Além do tamanho, o multi-stage reduz a superfície de ataque (sem compilador nem gerenciador de pacotes na imagem final) e permite estágios alternativos: `docker build --target build .` para parar num estágio de testes, por exemplo. O BuildKit executa em paralelo estágios independentes e **pula** os que o alvo não usa."
+        },
+        {
+          "type": "h",
+          "text": "Cache mounts e secret mounts"
+        },
+        {
+          "type": "p",
+          "text": "`RUN --mount` (sintaxe do frontend `dockerfile:1`, por isso a linha `# syntax=` no topo) anexa recursos temporários à execução de uma instrução:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`type=cache`: um diretório persistente **entre builds** (cache do npm, pip, apt, Go) que não entra na camada. A instalação continua incremental mesmo quando o lockfile muda.",
+            "`type=secret`: expõe um segredo como arquivo em `/run/secrets/<id>` apenas durante o `RUN`; ele não é gravado em camada nem em `history`.",
+            "`type=ssh`: encaminha o agente SSH para clonar repositórios privados sem copiar chaves.",
+            "`type=bind`: monta arquivos do contexto ou de outro estágio só para leitura, sem criar camada."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# cache de pacotes que sobrevive entre builds\nRUN --mount=type=cache,target=/root/.npm \\\n    npm ci --omit=dev\n\n# token privado, nunca em ARG/ENV\nRUN --mount=type=secret,id=npmrc,target=/root/.npmrc \\\n    npm ci",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker build --secret id=npmrc,src=$HOME/.npmrc -t app:dev ."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "O segredo some da imagem, mas **não** do seu terminal ou do log do CI se o comando o imprimir. E o valor passado via `--build-arg` não é segredo: aparece no `history`.",
+          "title": "Cuidado"
+        },
+        {
+          "type": "h",
+          "text": "Multi-plataforma com buildx"
+        },
+        {
+          "type": "p",
+          "text": "Imagens são específicas de arquitetura (`linux/amd64`, `linux/arm64`). Notebooks Apple Silicon e instâncias Graviton são ARM; a maioria dos servidores é amd64. Um **manifest list** (índice OCI) aponta para uma imagem por plataforma, e o runtime escolhe a certa no `pull`. O `buildx` gera esse índice:"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker buildx create --name multi --use\ndocker buildx build \\\n  --platform linux/amd64,linux/arm64 \\\n  -t ghcr.io/acme/app:1.4.2 --push .\ndocker buildx imagetools inspect ghcr.io/acme/app:1.4.2"
+        },
+        {
+          "type": "p",
+          "text": "Sem hardware nativo para cada arquitetura, o buildx emula via QEMU (lento, de 5 a 20 vezes). Para linguagens com cross-compilação, compile no estágio nativo e só empacote para o alvo, usando os argumentos automáticos `BUILDPLATFORM`, `TARGETOS` e `TARGETARCH`. O Go faz isso naturalmente; a Parte 3 da série de Go mostra o build multi-stage específico."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "FROM --platform=$BUILDPLATFORM golang:1 AS build\nARG TARGETOS TARGETARCH\nWORKDIR /src\nCOPY . .\nRUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/app .",
+          "file": "Dockerfile"
+        }
+      ]
+    },
+    {
+      "id": "base",
+      "title": "Escolhendo a imagem base",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A base define tamanho, superfície de ataque, ferramentas disponíveis e compatibilidade. Não existe resposta única; existe um espectro entre conveniência (shell, apt, depuração fácil) e minimalismo (menos CVEs, mais difícil de inspecionar)."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Base",
+            "Tamanho aprox.",
+            "Vantagens",
+            "Cuidados"
+          ],
+          "rows": [
+            [
+              "`debian:*-slim` / `ubuntu`",
+              "75 a 80 MB",
+              "glibc, apt, compatibilidade máxima",
+              "Mais pacotes, mais CVEs"
+            ],
+            [
+              "`alpine`",
+              "~8 MB",
+              "Pequena, apk, busybox",
+              "Usa **musl**, não glibc"
+            ],
+            [
+              "`distroless`",
+              "2 a 25 MB",
+              "Sem shell nem gerenciador de pacotes",
+              "Depuração exige variante `:debug` ou ephemeral container"
+            ],
+            [
+              "`scratch`",
+              "0 MB",
+              "Vazia; ideal para binário estático",
+              "Sem CA certs, tzdata nem `/etc/passwd`: copie do build"
+            ],
+            [
+              "Chainguard / Wolfi",
+              "10 a 50 MB",
+              "Minimalistas, glibc, CVEs próximos de zero, SBOM",
+              "Tags versionadas costumam exigir plano pago"
+            ]
+          ]
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Tamanho aproximado de imagens base",
+          "unit": "MB",
+          "bars": [
+            {
+              "label": "scratch",
+              "value": 0,
+              "display": "0"
+            },
+            {
+              "label": "distroless/static",
+              "value": 2,
+              "display": "~2 MB"
+            },
+            {
+              "label": "alpine",
+              "value": 8,
+              "display": "~8 MB"
+            },
+            {
+              "label": "distroless/base",
+              "value": 21,
+              "display": "~21 MB"
+            },
+            {
+              "label": "debian-slim",
+              "value": 75,
+              "display": "~75 MB"
+            },
+            {
+              "label": "ubuntu",
+              "value": 78,
+              "display": "~78 MB"
+            },
+            {
+              "label": "debian (completa)",
+              "value": 120,
+              "display": "~120 MB"
+            }
+          ],
+          "caption": "Valores ilustrativos e aproximados (descompactados); mudam a cada release de base."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**musl em vez de glibc**: binários compilados para glibc podem falhar com \"not found\" mesmo com o arquivo presente (falta o loader). Wheels `manylinux` do Python não servem; o `pip` compila do código-fonte, deixando o build lento e a imagem maior.",
+            "**DNS**: a resolução da musl tem diferenças históricas (busca de domínios, uso de TCP) que já causaram lentidão e falhas em clusters. Está melhor, mas é fonte clássica de \"funciona na máquina, falha no cluster\".",
+            "**Desempenho**: o alocador de memória da musl é mais lento em cargas multithread intensas.",
+            "Para um binário estático (Go, Rust), `scratch` ou `distroless/static` costuma ser melhor que Alpine; para Python ou Node, `-slim` baseado em Debian é a escolha pragmática."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Comece por `debian-slim`. Migre para distroless ou Chainguard quando houver pipeline de scan e ferramenta de depuração (ephemeral containers) maduras. Pense em tamanho como efeito colateral; o ganho real é menos código para ser vulnerável.",
+          "title": "Regra prática"
+        }
+      ]
+    },
+    {
+      "id": "tags",
+      "title": "Tags, digests e registries",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Uma imagem tem duas identidades: a **tag** (`app:1.4.2`), um ponteiro mutável e legível, e o **digest** (`app@sha256:9f86...`), o hash do manifest, imutável por construção (conteúdo endereçado). Quem empurra uma imagem diferente com a mesma tag move o ponteiro; o digest antigo continua existindo, mas ninguém mais o encontra pela tag."
+        },
+        {
+          "type": "diagram",
+          "title": "Tag aponta, digest identifica",
+          "cols": 12,
+          "rows": 8.6,
+          "nodes": [
+            {
+              "id": "t1",
+              "label": "app:1.4",
+              "x": 0.4,
+              "y": 0.6,
+              "w": 4.6,
+              "h": 2,
+              "sub": "tag móvel",
+              "variant": "muted"
+            },
+            {
+              "id": "t2",
+              "label": "app:1.4.2",
+              "x": 7,
+              "y": 0.6,
+              "w": 4.6,
+              "h": 2,
+              "sub": "tag de release"
+            },
+            {
+              "id": "dg",
+              "label": "sha256:9f86d0...",
+              "x": 3.4,
+              "y": 5.8,
+              "w": 5.4,
+              "h": 2,
+              "sub": "digest · imutável",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "t1",
+              "to": "dg",
+              "label": "aponta",
+              "dashed": true
+            },
+            {
+              "from": "t2",
+              "to": "dg",
+              "label": "aponta",
+              "accent": true
+            }
+          ],
+          "caption": "Várias tags podem apontar para o mesmo digest; reimplantar \"app:1.4\" pode, a qualquer momento, trazer outro conteúdo."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Publique uma tag **completa por release** (`1.4.2`) e, se quiser, tags flutuantes de conveniência (`1.4`, `1`).",
+            "Acrescente o SHA do commit (`sha-3f2a9c1`) para rastrear de qual código saiu a imagem.",
+            "Evite `latest` em produção: é só um nome, não significa \"mais recente\" nem \"estável\".",
+            "Registries oferecem **tag immutability** (ECR, Harbor, GHCR via política de retenção): ative para tags de release.",
+            "Em manifests de produção e em `FROM`, fixe por digest: `FROM node:22-slim@sha256:...`. Ferramentas como Renovate e Dependabot atualizam o digest por PR, mantendo reprodutibilidade e atualizações."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker build -t app:1.4.2 .\ndocker image inspect app:1.4.2 -f '{{.Id}}'\ndocker buildx imagetools inspect nginx:1.27 | head -5\ndocker pull nginx@sha256:<digest-completo>"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Registry",
+            "Característica",
+            "Observação"
+          ],
+          "rows": [
+            [
+              "Docker Hub",
+              "O padrão implícito (`docker.io`); imagens oficiais",
+              "Pull anônimo e gratuito tem limite por IP e janela de tempo (desde abr 2025: 10 pulls/hora anônimo, 100/hora com conta gratuita). Em CI, autentique ou use espelho"
+            ],
+            [
+              "GHCR (`ghcr.io`)",
+              "Integrado ao GitHub; permissões por repositório",
+              "Login com token do GitHub (PAT ou `GITHUB_TOKEN` no Actions)"
+            ],
+            [
+              "ECR / GAR / ACR",
+              "Registries gerenciados pelas nuvens",
+              "Autenticação por IAM; ECR tem tag immutability e scan nativos"
+            ],
+            [
+              "Harbor",
+              "Open source, self-hosted (CNCF)",
+              "Proxy-cache de Docker Hub, scan, replicação, assinatura"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "echo \"$GITHUB_TOKEN\" | docker login ghcr.io -u meuuser --password-stdin\ndocker tag app:1.4.2 ghcr.io/acme/app:1.4.2\ndocker push ghcr.io/acme/app:1.4.2\n\n# ECR: token temporário de 12 h\naws ecr get-login-password --region us-east-1 \\\n  | docker login --username AWS --password-stdin \\\n    123456789012.dkr.ecr.us-east-1.amazonaws.com"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "`docker login` grava um token em `~/.docker/config.json`. Sem um **credential helper** (`credsStore`: keychain, pass, secretservice), isso é só base64, não criptografia. Em CI, prefira tokens efêmeros e de menor escopo, e sempre `--password-stdin` em vez de `-p` (que vaza no histórico do shell).",
+          "title": "Credenciais"
+        }
+      ]
+    },
+    {
+      "id": "rede",
+      "title": "Rede: bridge, NAT e DNS",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Cada container tem seu **namespace de rede** (Parte 1): interface, rotas e tabela de portas próprias. No modo padrão, o Docker cria no host uma bridge virtual (`docker0`, tipicamente `172.17.0.0/16`) e, para cada container, um par de interfaces **veth**: uma ponta vira `eth0` dentro do container, a outra é plugada na bridge. A bridge funciona como um switch virtual e o host como roteador."
+        },
+        {
+          "type": "diagram",
+          "title": "Do cliente ao container (porta publicada)",
+          "cols": 12,
+          "rows": 16.4,
+          "nodes": [
+            {
+              "id": "cl",
+              "label": "Cliente",
+              "x": 0.6,
+              "y": 0,
+              "w": 4.6,
+              "h": 2,
+              "sub": "curl host:8080"
+            },
+            {
+              "id": "ipt",
+              "label": "iptables nat",
+              "x": 0.6,
+              "y": 5.2,
+              "w": 4.6,
+              "h": 2,
+              "sub": "DNAT :8080 → :80",
+              "variant": "accent"
+            },
+            {
+              "id": "br",
+              "label": "docker0",
+              "x": 3.5,
+              "y": 9.2,
+              "w": 5,
+              "h": 2,
+              "sub": "bridge 172.17.0.1"
+            },
+            {
+              "id": "c1",
+              "label": "web",
+              "x": 0.6,
+              "y": 13.4,
+              "w": 4.6,
+              "h": 2,
+              "sub": "eth0 172.17.0.2"
+            },
+            {
+              "id": "c2",
+              "label": "db",
+              "x": 6.8,
+              "y": 13.4,
+              "w": 4.6,
+              "h": 2,
+              "sub": "eth0 172.17.0.3"
+            }
+          ],
+          "edges": [
+            {
+              "from": "cl",
+              "to": "ipt",
+              "label": "host:8080",
+              "accent": true
+            },
+            {
+              "from": "ipt",
+              "to": "br",
+              "label": "encaminha"
+            },
+            {
+              "from": "br",
+              "to": "c1",
+              "label": "veth"
+            },
+            {
+              "from": "br",
+              "to": "c2",
+              "label": "veth"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Host Linux",
+              "x": 0,
+              "y": 4.2,
+              "w": 12,
+              "h": 12,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "Docker usa regras `DOCKER` na tabela nat (iptables, ou nftables nos backends novos) para redirecionar a porta publicada."
+        },
+        {
+          "type": "p",
+          "text": "`-p 8080:80` instrui o Docker a instalar uma regra **DNAT** (troca o destino do pacote de `host:8080` para `172.17.0.2:80`) e uma de **MASQUERADE** para a saída (SNAT: os pacotes do container saem com o IP do host). Os IPs dos containers são internos e efêmeros; é a porta publicada que serve de contrato com o mundo externo."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker run -d --name web -p 8080:80 nginx:1.27\ndocker port web\nsudo iptables -t nat -L DOCKER -n   # regra DNAT 8080 -> 172.17.0.x:80\nip -br link | grep veth             # pontas dos pares no host"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "`-p 5432:5432` publica em **todas** as interfaces (`0.0.0.0`) e, por o Docker inserir suas regras antes das do `ufw`/`firewalld`, o firewall do host pode não bloqueá-la. Para uso local, publique só no loopback: `-p 127.0.0.1:5432:5432`.",
+          "title": "Exposição acidental"
+        },
+        {
+          "type": "h",
+          "text": "Redes definidas pelo usuário e DNS"
+        },
+        {
+          "type": "p",
+          "text": "Na bridge padrão, containers só se alcançam por IP. Em uma **rede definida pelo usuário** (`docker network create`), o Docker liga um **DNS embutido** (127.0.0.11 dentro de cada container) que resolve **nomes de container e aliases** de serviço para IPs. É também isolamento: containers em redes diferentes não se enxergam."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker network create app-net\ndocker run -d --name db --network app-net \\\n  -e POSTGRES_PASSWORD=dev postgres:17\ndocker run --rm --network app-net postgres:17 \\\n  psql -h db -U postgres -c 'select 1'    # \"db\" resolve via DNS\ndocker network inspect app-net"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Modo",
+            "Isolamento",
+            "Uso"
+          ],
+          "rows": [
+            [
+              "`bridge` (padrão)",
+              "Rede própria atrás de NAT; sem DNS por nome",
+              "Legado; prefira rede definida pelo usuário"
+            ],
+            [
+              "bridge definida pelo usuário",
+              "Rede própria, DNS por nome, isolamento entre redes",
+              "Padrão para apps com vários containers; é o que o Compose cria"
+            ],
+            [
+              "`host`",
+              "Compartilha a pilha de rede do host; `-p` é ignorado",
+              "Desempenho máximo ou muitas portas; sem isolamento (no Linux; Docker Desktop tem suporte limitado)"
+            ],
+            [
+              "`none`",
+              "Só loopback",
+              "Processamento em lote sem rede; isolamento total"
+            ],
+            [
+              "`container:<nome>`",
+              "Entra no namespace de rede de outro container",
+              "Sidecars e depuração (veja o fim do guia)"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "armazenamento",
+      "title": "Armazenamento e dados",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A camada gravável do container (Parte 1) é efêmera e mais lenta (passa pelo overlayfs): `docker rm` a apaga. Dados que precisam sobreviver ou ser compartilhados ficam em **volumes**, **bind mounts** ou, quando só devem existir na RAM, **tmpfs**."
+        },
+        {
+          "type": "diagram",
+          "title": "Onde o container grava",
+          "cols": 12,
+          "rows": 11.1,
+          "nodes": [
+            {
+              "id": "ct",
+              "label": "Container",
+              "x": 0,
+              "y": 3.0,
+              "w": 3.0,
+              "h": 5.2,
+              "sub": "processo"
+            },
+            {
+              "id": "w",
+              "label": "Camada gravável",
+              "x": 6.8,
+              "y": 0,
+              "w": 5.2,
+              "h": 2,
+              "sub": "some com o rm",
+              "variant": "muted"
+            },
+            {
+              "id": "v",
+              "label": "Volume nomeado",
+              "x": 6.8,
+              "y": 2.9,
+              "w": 5.2,
+              "h": 2,
+              "sub": "gerenciado pelo Docker",
+              "variant": "accent"
+            },
+            {
+              "id": "b",
+              "label": "Bind mount",
+              "x": 6.8,
+              "y": 5.8,
+              "w": 5.2,
+              "h": 2,
+              "sub": "pasta do host"
+            },
+            {
+              "id": "tm",
+              "label": "tmpfs",
+              "x": 6.8,
+              "y": 8.7,
+              "w": 5.2,
+              "h": 2,
+              "sub": "só RAM",
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "ct",
+              "to": "w",
+              "label": "/"
+            },
+            {
+              "from": "ct",
+              "to": "v",
+              "label": "-v dados:/data",
+              "accent": true
+            },
+            {
+              "from": "ct",
+              "to": "b",
+              "label": "-v ./src:/app"
+            },
+            {
+              "from": "ct",
+              "to": "tm",
+              "label": "--tmpfs /tmp"
+            }
+          ],
+          "caption": "Preferir sempre `--mount` (explícito) a `-v` em scripts: ele falha se o caminho do bind não existir, em vez de criar um diretório vazio."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Tipo",
+            "Persiste após `rm`",
+            "Quem gerencia",
+            "Quando usar"
+          ],
+          "rows": [
+            [
+              "Camada gravável",
+              "Não",
+              "Docker (overlay)",
+              "Arquivos temporários pequenos"
+            ],
+            [
+              "Volume nomeado",
+              "Sim",
+              "Docker (`/var/lib/docker/volumes`)",
+              "Bancos de dados, estado da aplicação"
+            ],
+            [
+              "Bind mount",
+              "Sim (é o host)",
+              "Você",
+              "Código em desenvolvimento, configs; evite em produção"
+            ],
+            [
+              "tmpfs",
+              "Não",
+              "Kernel (RAM)",
+              "Segredos temporários, cache rápido, `/tmp` com `--read-only`"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker volume create pgdata\ndocker run -d --name db \\\n  --mount type=volume,src=pgdata,dst=/var/lib/postgresql/data \\\n  -e POSTGRES_PASSWORD=dev postgres:17\n\n# bind mount somente leitura\ndocker run --rm --mount type=bind,src=\"$PWD\",dst=/site,ro nginx:1.27\n\n# backup de um volume via container auxiliar\ndocker run --rm -v pgdata:/data -v \"$PWD\":/backup alpine \\\n  tar czf /backup/pgdata.tgz -C /data ."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Bind mount esconde o conteúdo da imagem** naquele caminho. Montar `./` sobre `/app` oculta o `node_modules` instalado na imagem.",
+            "Um **volume vazio** montado sobre um diretório que tem conteúdo na imagem é populado com esse conteúdo na primeira vez (copy-up). Bind mounts não fazem isso.",
+            "`docker rm` **não** apaga volumes nomeados; `docker compose down -v` e `docker volume prune` apagam.",
+            "Em Docker Desktop (macOS/Windows), bind mounts atravessam uma VM e são bem mais lentos que volumes."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O kernel só enxerga **números** de UID/GID, não nomes. Se a imagem roda como UID 1000 e o diretório do host pertence ao UID 1001, ocorre `permission denied`. Nos volumes nomeados o diretório nasce como root, e um app não-root não consegue gravar nele."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# rodar como o seu usuário do host (arquivos gerados ficam seus)\ndocker run --rm --user \"$(id -u):$(id -g)\" -v \"$PWD\":/w -w /w node:22 npm ci\n\n# SELinux (Fedora, RHEL): relabel do bind\ndocker run -v \"$PWD\":/data:Z img"
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# preparar o diretório de dados já com o dono certo\nRUN mkdir -p /data && chown app:app /data\nVOLUME /data\nUSER app",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Em Docker/Podman **rootless**, o root do container é mapeado para o seu usuário do host (user namespace). Isso muda quem é o dono dos arquivos nos bind mounts; o Podman oferece `:U` e `--userns=keep-id` para ajustar.",
+          "title": "Rootless"
+        }
+      ]
+    },
+    {
+      "id": "recursos",
+      "title": "Limites de recursos e o que acontece no OOM",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Sem limites, um container consome o que o host der. Os limites do Docker são traduzidos em arquivos do **cgroup v2** (Parte 1) e cada um falha de um jeito diferente:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Flag",
+            "Efeito (cgroup)",
+            "Ao exceder"
+          ],
+          "rows": [
+            [
+              "`--memory 256m`",
+              "`memory.max`",
+              "O kernel mata processos: **OOM kill**"
+            ],
+            [
+              "`--memory-reservation`",
+              "`memory.low`/soft",
+              "Só pressão de reclaim; não mata"
+            ],
+            [
+              "`--cpus 1.5`",
+              "`cpu.max` (quota/período)",
+              "**Throttling**: o processo é pausado; não morre"
+            ],
+            [
+              "`--cpu-shares`",
+              "`cpu.weight`",
+              "Peso relativo apenas sob disputa"
+            ],
+            [
+              "`--pids-limit 200`",
+              "`pids.max`",
+              "`fork` falha (contra fork bombs)"
+            ],
+            [
+              "`--ulimit nofile=...`",
+              "rlimit do processo",
+              "Erros de \"too many open files\""
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker run -d --name api \\\n  --memory 256m --memory-swap 256m \\\n  --cpus 1.5 --pids-limit 200 \\\n  --restart on-failure:3 \\\n  minha-api:1.4.2\n\ndocker stats --no-stream api"
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Memória de um container com vazamento",
+          "xLabel": "tempo (min)",
+          "yLabel": "MEMÓRIA (MB)",
+          "yMax": 300,
+          "series": [
+            {
+              "name": "Uso",
+              "tone": "primary",
+              "points": [
+                [
+                  0,
+                  60
+                ],
+                [
+                  2,
+                  90
+                ],
+                [
+                  4,
+                  125
+                ],
+                [
+                  6,
+                  160
+                ],
+                [
+                  8,
+                  200
+                ],
+                [
+                  10,
+                  240
+                ],
+                [
+                  11,
+                  256
+                ]
+              ]
+            },
+            {
+              "name": "Limite (--memory 256m)",
+              "tone": "accent",
+              "dashed": true,
+              "points": [
+                [
+                  0,
+                  256
+                ],
+                [
+                  12,
+                  256
+                ]
+              ]
+            }
+          ],
+          "caption": "Curva ilustrativa: quando o uso atinge o limite e o kernel não consegue recuperar páginas, ocorre o OOM kill."
+        },
+        {
+          "type": "p",
+          "text": "No OOM, o kernel escolhe um processo **dentro do cgroup** e o mata com SIGKILL. Se for o PID 1, o container sai com código **137** e o `docker inspect` mostra `OOMKilled: true`. Com `--memory-swap` igual a `--memory`, não há swap: o app não degrada lentamente, cai de uma vez, o que é mais fácil de detectar."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' api\n# true 137\ndmesg | grep -i 'killed process'     # no host"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Runtimes precisam enxergar o limite do cgroup: a JVM (desde o Java 10) e o Go (a partir do 1.25, para `GOMAXPROCS`) já são conscientes de containers. Em outras linguagens, ajuste manualmente (por exemplo `--max-old-space-size` no Node, em ~75% do limite).",
+          "title": "Runtime e limite"
+        }
+      ]
+    },
+    {
+      "id": "seguranca",
+      "title": "Segurança na prática",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um container **não é uma fronteira de segurança forte** como uma VM: todos compartilham o kernel. A defesa é em camadas, reduzindo o que o processo pode fazer se for comprometido:"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Não rode como root",
+              "text": "`USER` não-root na imagem. É a medida de melhor custo-benefício."
+            },
+            {
+              "title": "Remova capabilities",
+              "text": "Containers começam com um subconjunto de capabilities do Linux; descarte-as todas e devolva só as necessárias."
+            },
+            {
+              "title": "Sistema de arquivos somente leitura",
+              "text": "O atacante não consegue plantar binários nem alterar a aplicação."
+            },
+            {
+              "title": "Bloqueie escalonamento",
+              "text": "`no-new-privileges` impede que `setuid` e similares ganhem privilégios."
+            },
+            {
+              "title": "Mantenha o perfil seccomp padrão",
+              "text": "Ele bloqueia dezenas de syscalls perigosas; só mude com motivo e nunca use `unconfined`."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker run -d --name api \\\n  --user 10001:10001 \\\n  --cap-drop ALL \\\n  --read-only --tmpfs /tmp \\\n  --security-opt no-new-privileges \\\n  minha-api:1.4.2"
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "RUN useradd --system --uid 10001 --no-create-home app\nUSER 10001:10001",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Montar `/var/run/docker.sock` num container equivale a dar **root no host**: quem fala com o socket cria um container privilegiado montando `/`. O mesmo vale para `--privileged`, `--pid host` e `--cap-add SYS_ADMIN`. Para CI que precisa construir imagens, use BuildKit remoto, Kaniko/Buildah ou runners em VMs descartáveis.",
+          "title": "docker.sock e --privileged"
+        },
+        {
+          "type": "p",
+          "text": "O próprio daemon do Docker costuma rodar como root. O **modo rootless** (Docker: `dockerd-rootless-setuptool.sh install`) e o **Podman** (sem daemon, rootless por padrão) executam tudo como seu usuário usando user namespaces: um escape do container cai num usuário comum, não em root. O custo: portas abaixo de 1024 exigem ajuste de `net.ipv4.ip_unprivileged_port_start`, rede mais lenta (slirp4netns/pasta) e alguns drivers indisponíveis."
+        },
+        {
+          "type": "h",
+          "text": "Cadeia de suprimentos: scan, SBOM e assinatura"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Scan**: compara os pacotes da imagem com bases de CVEs. Trivy, Grype e Docker Scout fazem isso; rode no CI e falhe só em severidade alta/crítica com correção disponível.",
+            "**SBOM** (lista de materiais de software, formatos SPDX ou CycloneDX): inventário dos componentes, útil para responder \"estamos afetados por essa CVE?\" sem rebuild.",
+            "**Assinatura**: prova quem construiu a imagem e que o conteúdo não mudou. O **cosign** (Sigstore) assina o digest; no modo *keyless* a identidade vem de um token OIDC (ex.: o workflow do GitHub Actions) e fica registrada num log de transparência."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "trivy image --severity HIGH,CRITICAL --exit-code 1 app:1.4.2\ngrype app:1.4.2\ndocker scout cves app:1.4.2\n\n# SBOM e atestado de proveniência gerados no próprio build\ndocker buildx build --sbom=true --provenance=mode=max \\\n  -t ghcr.io/acme/app:1.4.2 --push .\nsyft ghcr.io/acme/app:1.4.2 -o spdx-json > sbom.spdx.json\n\n# assina o DIGEST e verifica no destino\ncosign sign ghcr.io/acme/app@sha256:<digest>\ncosign verify ghcr.io/acme/app@sha256:<digest> \\\n  --certificate-identity-regexp 'https://github.com/acme/.*' \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+        }
+      ]
+    },
+    {
+      "id": "compose",
+      "title": "Docker Compose v2",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O **Compose** descreve, num único `compose.yaml`, os serviços, redes e volumes de uma aplicação e os sobe com um comando. O Compose v2 é um plugin do CLI (`docker compose`, com espaço), reimplementado em Go; o arquivo canônico é `compose.yaml` (`docker-compose.yml` ainda é lido) e a chave `version:` é obsoleta."
+        },
+        {
+          "type": "p",
+          "text": "Por padrão ele cria um projeto (nome do diretório), **uma rede definida pelo usuário** compartilhada por todos os serviços e volumes com prefixo do projeto. Cada serviço é alcançado pelo seu nome via DNS embutido: o web conecta em `db:5432`, não em um IP."
+        },
+        {
+          "type": "diagram",
+          "title": "Aplicação web + postgres + redis",
+          "cols": 12,
+          "rows": 15.6,
+          "nodes": [
+            {
+              "id": "br",
+              "label": "Navegador",
+              "x": 3.5,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "localhost:8000"
+            },
+            {
+              "id": "web",
+              "label": "web",
+              "x": 3.5,
+              "y": 4.8,
+              "w": 5,
+              "h": 2,
+              "sub": "build: . · porta 3000",
+              "variant": "accent"
+            },
+            {
+              "id": "db",
+              "label": "db",
+              "x": 0.6,
+              "y": 9.2,
+              "w": 4.6,
+              "h": 2,
+              "sub": "postgres:17"
+            },
+            {
+              "id": "rd",
+              "label": "cache",
+              "x": 6.8,
+              "y": 9.2,
+              "w": 4.6,
+              "h": 2,
+              "sub": "redis:7"
+            },
+            {
+              "id": "vol",
+              "label": "pgdata",
+              "x": 0.6,
+              "y": 13.4,
+              "w": 4.6,
+              "h": 2,
+              "sub": "volume nomeado",
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "br",
+              "to": "web",
+              "label": "-p 8000:3000",
+              "accent": true
+            },
+            {
+              "from": "web",
+              "to": "db",
+              "label": "5432"
+            },
+            {
+              "from": "web",
+              "to": "rd",
+              "label": "6379"
+            },
+            {
+              "from": "db",
+              "to": "vol",
+              "label": "persiste",
+              "dashed": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Rede padrão do projeto (DNS por nome de serviço)",
+              "x": 0,
+              "y": 3.8,
+              "w": 12,
+              "h": 8.6
+            }
+          ],
+          "caption": "Só o `web` publica porta. `db` e `cache` ficam alcançáveis apenas dentro da rede."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "name: loja\n\nservices:\n  web:\n    build: .\n    ports:\n      - \"127.0.0.1:8000:3000\"\n    environment:\n      DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/loja\n      REDIS_URL: redis://cache:6379\n    depends_on:\n      db:\n        condition: service_healthy\n      cache:\n        condition: service_started\n    restart: unless-stopped\n    read_only: true\n    tmpfs: [/tmp]\n\n  db:\n    image: postgres:17\n    environment:\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: ${DB_PASSWORD}\n      POSTGRES_DB: loja\n    volumes:\n      - pgdata:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U app -d loja\"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n\n  cache:\n    image: redis:7-alpine\n\n  adminer:\n    image: adminer\n    profiles: [debug]\n    ports: [\"127.0.0.1:8081:8080\"]\n\nvolumes:\n  pgdata:",
+          "file": "compose.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# .env (não vai pro Git) -- lido automaticamente pelo Compose\nDB_PASSWORD=troque-isto"
+        },
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "depends_on",
+              "def": "Ordem de **início**. Sozinho só espera o container *iniciar*, não o app aceitar conexões; com `condition: service_healthy` espera o healthcheck do dependente ficar saudável."
+            },
+            {
+              "term": "environment / env_file",
+              "def": "Variáveis para o container. `${VAR}` é interpolada a partir do shell ou do arquivo `.env` no diretório do projeto; `${VAR:-padrão}` e `${VAR:?erro}` dão valor padrão ou falham. `env_file:` carrega um arquivo inteiro para dentro do container."
+            },
+            {
+              "term": "profiles",
+              "def": "Serviços opcionais: só sobem com `--profile debug`. Úteis para ferramentas de apoio, migrations e testes."
+            },
+            {
+              "term": "volumes (topo)",
+              "def": "Declara volumes nomeados do projeto; sobrevivem a `docker compose down` e somem com `down -v`."
+            },
+            {
+              "term": "secrets",
+              "def": "Monta arquivos em `/run/secrets/<nome>`. Imagens oficiais (postgres) aceitam `POSTGRES_PASSWORD_FILE`, evitando segredo em variável de ambiente."
+            },
+            {
+              "term": "develop.watch",
+              "def": "Com `docker compose watch`, sincroniza arquivos ou reconstrói o serviço ao salvar código."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker compose config            # valida e mostra o YAML resolvido\ndocker compose up -d --build --wait\ndocker compose ps\ndocker compose logs -f web\ndocker compose --profile debug up -d adminer\ndocker compose exec db psql -U app loja\ndocker compose down              # remove containers e rede (mantém volumes)\ndocker compose down -v           # e apaga os volumes"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "`depends_on` ordena o início, não garante que o banco aceite conexões nem resolve reinícios posteriores. O app deve **tentar de novo** a conexão com backoff; o healthcheck apenas reduz o ruído na subida. O mesmo vale no Kubernetes.",
+          "title": "Ordem não é prontidão"
+        }
+      ]
+    },
+    {
+      "id": "depuracao",
+      "title": "Depuração: olhar para dentro sem quebrar nada",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Container que sai logo, não responde ou não acha o vizinho: comece pelo que o Docker sabe e vá descendo."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Sintoma",
+            "Primeiro comando",
+            "O que procurar"
+          ],
+          "rows": [
+            [
+              "Sai imediatamente",
+              "`docker logs <c>` e `docker ps -a`",
+              "Código de saída (0, 1, 126/127 comando, 137 SIGKILL/OOM, 143 SIGTERM)"
+            ],
+            [
+              "Comando não encontrado",
+              "`docker run --rm -it --entrypoint sh img`",
+              "Caminho, CRLF no script, ENTRYPOINT/CMD incorretos"
+            ],
+            [
+              "Config estranha",
+              "`docker inspect <c>`",
+              "`Env`, `Mounts`, `NetworkSettings`, `HostConfig`, `State`"
+            ],
+            [
+              "Lentidão ou reinícios",
+              "`docker stats` e `docker events`",
+              "Memória no teto, CPU throttled, die/oom/restart nos eventos"
+            ],
+            [
+              "Mudou algo no filesystem",
+              "`docker diff <c>`",
+              "Arquivos criados ou modificados na camada gravável"
+            ],
+            [
+              "Sem rede entre serviços",
+              "`docker network inspect <rede>`",
+              "Estão na mesma rede? Nome resolve?"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker logs --since 10m --tail 200 -t web\ndocker inspect -f '{{json .State}}' web | jq\ndocker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{\"\\n\"}}{{end}}' web\ndocker exec -it web sh\ndocker top web                   # processos vistos do host\ndocker cp web:/app/error.log .\ndocker events --filter container=web"
+        },
+        {
+          "type": "p",
+          "text": "Imagens distroless e `scratch` não têm shell, `curl` nem `ps`: bom para segurança, ruim para investigar. Em vez de instalar ferramentas na imagem de produção, **anexe** um container de ferramentas ao mesmo namespace do alvo. O `nicolaka/netshoot` traz `curl`, `dig`, `ss`, `tcpdump`, `iperf` e mais."
+        },
+        {
+          "type": "diagram",
+          "title": "Sidecar de depuração",
+          "cols": 12,
+          "rows": 5.2,
+          "nodes": [
+            {
+              "id": "app",
+              "label": "app",
+              "x": 0.6,
+              "y": 0.9,
+              "w": 4.6,
+              "h": 2,
+              "sub": "sem shell"
+            },
+            {
+              "id": "ns",
+              "label": "netshoot",
+              "x": 6.8,
+              "y": 0.9,
+              "w": 4.6,
+              "h": 2,
+              "sub": "curl · dig · ss",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "ns",
+              "to": "app",
+              "label": "netns",
+              "both": true,
+              "accent": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Mesmo namespace de rede (e opcionalmente de PID)",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 4.8,
+              "labelAt": "bottom"
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "docker run -it --rm --network container:web nicolaka/netshoot\n# dentro: ss -tlnp ; dig db ; curl -v localhost:3000/health ; tcpdump -i eth0\n\n# também ver os processos do alvo\ndocker run -it --rm --pid container:web --network container:web \\\n  --cap-add SYS_PTRACE nicolaka/netshoot"
+        },
+        {
+          "type": "p",
+          "text": "Quem usa Docker Desktop ou Docker Business pode usar `docker debug <container>`, que injeta uma shell com ferramentas num container que não tem nenhuma, sem alterar a imagem. É funcionalidade do Docker Desktop/assinatura, não do Engine puro. No Kubernetes, a mesma ideia é o **ephemeral container** (`kubectl debug`)."
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Debug que exige entrar no container já é sinal de falta de observabilidade. Registre logs em stdout/stderr (não em arquivo dentro do container), exponha métricas e um endpoint de saúde, e imprima versão e configuração (sem segredos) na inicialização.",
+          "title": "Para não precisar depurar"
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Consequência",
+            "Como evitar"
+          ],
+          "rows": [
+            [
+              "`CMD node app.js` (forma shell)",
+              "SIGTERM não chega ao app; `stop` leva 10 s e termina em SIGKILL",
+              "Forma exec com JSON; `exec \"$@\"` em scripts"
+            ],
+            [
+              "`COPY . .` antes de instalar dependências",
+              "Cada commit refaz o `npm ci`/`pip install`",
+              "Copiar manifestos primeiro; `.dockerignore`"
+            ],
+            [
+              "Segredo em `ARG`, `ENV` ou `COPY .env`",
+              "Credenciais ficam nas camadas e no `history`",
+              "`--mount=type=secret` ou injeção em runtime"
+            ],
+            [
+              "Usar `latest`",
+              "Deploys não reproduzíveis; rollback incerto",
+              "Tags de release + digest"
+            ],
+            [
+              "Rodar como root",
+              "Escape ou bug vira root no container (e talvez no host)",
+              "`USER` não-root, `--cap-drop ALL`, rootless"
+            ],
+            [
+              "Dados na camada gravável",
+              "Perda no `rm`/recriação",
+              "Volumes nomeados"
+            ],
+            [
+              "`-p 5432:5432` em servidor",
+              "Banco exposto à internet, driblando o ufw",
+              "`127.0.0.1:` no bind ou rede interna sem `ports`"
+            ],
+            [
+              "Montar `docker.sock`",
+              "Root no host para quem comprometer o container",
+              "Builders sem daemon; runners descartáveis"
+            ],
+            [
+              "Alpine por reflexo",
+              "Incompatibilidade com glibc, builds lentos, DNS",
+              "`-slim` ou distroless, conforme o caso"
+            ],
+            [
+              "Confiar em `depends_on` sem healthcheck",
+              "App sobe antes do banco e quebra",
+              "`service_healthy` + retry com backoff no app"
+            ],
+            [
+              "Sem limite de memória",
+              "Um vazamento derruba o host inteiro",
+              "`--memory` e monitorar `OOMKilled`"
+            ],
+            [
+              "`apt-get update` separado do `install`",
+              "Pacotes velhos por cache antigo",
+              "Encadear no mesmo `RUN`, limpar listas"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "BuildKit",
+              "def": "Motor de build do Docker (padrão desde a 23): execução paralela de estágios, cache avançado, `--mount`, multi-plataforma."
+            },
+            {
+              "term": "buildx",
+              "def": "Plugin do CLI que expõe os recursos do BuildKit (multi-plataforma, cache externo, SBOM)."
+            },
+            {
+              "term": "Camada de cache",
+              "def": "Resultado de uma instrução do Dockerfile reaproveitado se a chave não mudou."
+            },
+            {
+              "term": "Contexto de build",
+              "def": "Diretório enviado ao construtor; o `.dockerignore` filtra o que vai."
+            },
+            {
+              "term": "Digest",
+              "def": "Hash SHA-256 do manifest de uma imagem; identificador imutável."
+            },
+            {
+              "term": "Distroless",
+              "def": "Imagens sem shell e sem gerenciador de pacotes, apenas o runtime da aplicação."
+            },
+            {
+              "term": "DNAT",
+              "def": "Tradução do destino do pacote; é como `-p` redireciona do host para o container."
+            },
+            {
+              "term": "Manifest list",
+              "def": "Índice OCI que aponta para uma imagem por plataforma (amd64, arm64)."
+            },
+            {
+              "term": "Multi-stage",
+              "def": "Dockerfile com vários `FROM`; só o último estágio vira a imagem final."
+            },
+            {
+              "term": "OOM kill",
+              "def": "Morte de um processo pelo kernel por exceder o limite de memória do cgroup (código 137)."
+            },
+            {
+              "term": "Rootless",
+              "def": "Executar o runtime e os containers sem privilégios de root no host, via user namespaces."
+            },
+            {
+              "term": "SBOM",
+              "def": "Lista de materiais de software: inventário de pacotes e versões dentro da imagem."
+            },
+            {
+              "term": "Sigstore / cosign",
+              "def": "Projeto e ferramenta para assinar e verificar artefatos, inclusive sem chaves permanentes."
+            },
+            {
+              "term": "veth",
+              "def": "Par de interfaces virtuais ligadas entre si; uma ponta no container, outra na bridge."
+            },
+            {
+              "term": "Volume",
+              "def": "Armazenamento gerenciado pelo Docker, independente do ciclo de vida do container."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Você já sabe construir, empacotar, rodar e proteger um container, e descrever uma aplicação inteira no Compose. O Kubernetes pega esses mesmos conceitos e os distribui por muitas máquinas, com um plano de controle que reconcilia o estado desejado."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Docker / Compose",
+            "Kubernetes"
+          ],
+          "rows": [
+            [
+              "Container",
+              "Container dentro de um **Pod** (unidade mínima de agendamento)"
+            ],
+            [
+              "`-p host:container`",
+              "**Service** (ClusterIP, NodePort, LoadBalancer) e Ingress/Gateway"
+            ],
+            [
+              "Rede definida pelo usuário + DNS",
+              "DNS do cluster (CoreDNS): `servico.namespace.svc`"
+            ],
+            [
+              "Volume nomeado",
+              "**PersistentVolumeClaim** + PersistentVolume + StorageClass"
+            ],
+            [
+              "Bind mount",
+              "`hostPath` (evite) ou ConfigMap/Secret como volume"
+            ],
+            [
+              "Serviço do Compose",
+              "**Deployment** (ou StatefulSet) + Service"
+            ],
+            [
+              "`environment` / `env_file` / secrets",
+              "ConfigMap e Secret"
+            ],
+            [
+              "`HEALTHCHECK`, `depends_on: service_healthy`",
+              "Probes (liveness, readiness, startup) e init containers"
+            ],
+            [
+              "`--memory`, `--cpus`",
+              "`resources.requests` e `resources.limits`"
+            ],
+            [
+              "`--restart`",
+              "`restartPolicy` + controllers que recriam Pods"
+            ],
+            [
+              "`--user`, `--cap-drop`, `--read-only`",
+              "`securityContext` do Pod e do container"
+            ],
+            [
+              "Profiles, `.env`",
+              "Kustomize overlays, Helm values"
+            ],
+            [
+              "`docker logs` / `exec`",
+              "`kubectl logs` / `exec` / `debug`"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O próximo passo é a série de Kubernetes, começando por **Kubernetes 1 — Arquitetura e fundamentos**: control plane, o modelo declarativo, o loop de reconciliação e o ciclo de vida de um Pod."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Se você trabalha com Go, **Go 3** traz o build multi-stage específico da linguagem (binário estático, `scratch` ou distroless, cache de módulos), aplicando o que viu aqui.",
+          "title": "Quer um exemplo concreto?"
+        }
+      ]
+    }
+  ]
+}

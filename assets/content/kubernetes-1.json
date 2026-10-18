@@ -72,6 +72,12 @@
           "text": "Um container é só um processo Linux com visão restrita do sistema (**namespaces** de PID, rede, montagem...) e limites de recursos (**cgroups**). Isso o torna barato, mas um container sozinho não sabe se recuperar quando o host morre. É essa lacuna que o Kubernetes preenche."
         },
         {
+          "type": "callout",
+          "variant": "tip",
+          "title": "Pré-requisito",
+          "text": "Se namespaces, cgroups, camadas de imagem ou `docker run` ainda são nebulosos, leia antes a série **Containers** (partes 1 e 2). Este guia assume que você já sabe o que é um container e como uma imagem é construída."
+        },
+        {
           "type": "h",
           "text": "O que o Kubernetes entrega"
         },
