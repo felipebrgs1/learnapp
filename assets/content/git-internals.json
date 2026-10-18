@@ -1,0 +1,674 @@
+{
+  "id": "git-internals",
+  "title": "Git por dentro",
+  "summary": "Objetos, hashes, refs e o grafo de commits: o modelo mental que torna merge, rebase e recuperação previsíveis.",
+  "category": "Fundamentos",
+  "level": "Intermediário",
+  "minutes": 14,
+  "updated": "out 2026",
+  "tags": [
+    "git",
+    "versionamento",
+    "commit",
+    "branch",
+    "rebase",
+    "merge",
+    "reflog",
+    "sha",
+    "objetos",
+    "dag"
+  ],
+  "sections": [
+    {
+      "id": "modelo",
+      "title": "O modelo mental",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Por baixo dos comandos, o Git é surpreendentemente simples: um **banco de dados chave-valor endereçado por conteúdo**, mais um punhado de **ponteiros** com nome."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Objetos** guardam conteúdo e são imutáveis. A chave de cada objeto é o hash do seu conteúdo.",
+            "**Refs** (branches, tags, `HEAD`) são só nomes que apontam para um commit.",
+            "Commits apontam para seus pais, formando um **grafo acíclico dirigido (DAG)**."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Quase toda operação do Git é \"criar objetos novos\" ou \"mover um ponteiro\". Objetos nunca são editados — por isso é tão difícil perder trabalho de verdade."
+        }
+      ]
+    },
+    {
+      "id": "objetos",
+      "title": "Os quatro tipos de objeto",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Objeto",
+            "Guarda",
+            "Aponta para"
+          ],
+          "rows": [
+            [
+              "blob",
+              "Conteúdo de um arquivo (sem nome, sem permissões)",
+              "—"
+            ],
+            [
+              "tree",
+              "Uma listagem de diretório: nomes, modos e hashes",
+              "blobs e outras trees"
+            ],
+            [
+              "commit",
+              "Autor, committer, data, mensagem",
+              "uma tree (o snapshot) e zero ou mais pais"
+            ],
+            [
+              "tag",
+              "Tag anotada: nome, autor, mensagem, assinatura opcional",
+              "normalmente um commit"
+            ]
+          ]
+        },
+        {
+          "type": "diagram",
+          "title": "Um commit e seu snapshot",
+          "cols": 12,
+          "rows": 11,
+          "nodes": [
+            {
+              "id": "c",
+              "label": "commit a1f3…",
+              "x": 0,
+              "y": 0,
+              "w": 5,
+              "h": 2.4,
+              "sub": "autor · mensagem",
+              "variant": "accent"
+            },
+            {
+              "id": "parent",
+              "label": "commit 9c2e…",
+              "x": 7,
+              "y": 0,
+              "w": 5,
+              "h": 2.4,
+              "sub": "pai",
+              "variant": "muted"
+            },
+            {
+              "id": "t",
+              "label": "tree 4b82…",
+              "x": 0,
+              "y": 4.3,
+              "w": 5,
+              "h": 2.4,
+              "sub": "/ (raiz)"
+            },
+            {
+              "id": "b1",
+              "label": "blob ce01…",
+              "x": 7,
+              "y": 4.3,
+              "w": 5,
+              "h": 2.4,
+              "sub": "README.md"
+            },
+            {
+              "id": "t2",
+              "label": "tree 7d1a…",
+              "x": 0,
+              "y": 8.6,
+              "w": 5,
+              "h": 2.4,
+              "sub": "src/"
+            },
+            {
+              "id": "b2",
+              "label": "blob 3e5f…",
+              "x": 7,
+              "y": 8.6,
+              "w": 5,
+              "h": 2.4,
+              "sub": "main.go"
+            }
+          ],
+          "edges": [
+            {
+              "from": "c",
+              "to": "parent",
+              "dashed": true,
+              "label": "parent"
+            },
+            {
+              "from": "c",
+              "to": "t",
+              "label": "tree"
+            },
+            {
+              "from": "t",
+              "to": "b1"
+            },
+            {
+              "from": "t",
+              "to": "t2"
+            },
+            {
+              "from": "t2",
+              "to": "b2"
+            }
+          ],
+          "groups": [],
+          "caption": "Um commit é um **snapshot completo** (via sua tree), não um diff. Diffs são calculados na hora, comparando trees."
+        },
+        {
+          "type": "p",
+          "text": "Como blobs não têm nome, dois arquivos com o mesmo conteúdo em qualquer lugar do histórico são **o mesmo objeto**, armazenado uma única vez."
+        }
+      ]
+    },
+    {
+      "id": "hash",
+      "title": "Endereçamento por conteúdo",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O nome de cada objeto é o hash de um cabeçalho (`tipo tamanho\\0`) seguido do conteúdo. Por padrão o Git usa SHA-1; repositórios podem ser criados com SHA-256 (`git init --object-format=sha256`)."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ echo 'hello' | git hash-object --stdin\nce013625030ba8dba906f756967f9e9ca394464a\n\n$ git cat-file -t HEAD        # tipo do objeto\ncommit\n$ git cat-file -p HEAD        # conteúdo legível\ntree 4b82e1c...\nparent 9c2e8f0...\nauthor Ana <ana@exemplo.dev> 1760659200 -0300\ncommitter Ana <ana@exemplo.dev> 1760659200 -0300\n\nfeat: primeira versão",
+          "file": "inspecionando objetos"
+        },
+        {
+          "type": "p",
+          "text": "Consequências diretas desse design:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Integridade** — mudar um byte de um arquivo muda o hash do blob, da tree, do commit e de todos os descendentes.",
+            "**Deduplicação** — conteúdo igual, hash igual, armazenado uma vez.",
+            "**Comparação barata** — se duas trees têm o mesmo hash, tudo abaixo delas é idêntico; o Git nem precisa olhar."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refs",
+      "title": "Refs, branches e HEAD",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Uma branch é um arquivo minúsculo contendo um hash de commit. Criar uma branch custa o mesmo que escrever 41 bytes."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ cat .git/HEAD\nref: refs/heads/main\n$ cat .git/refs/heads/main\na1f3c07d9e...",
+          "file": ".git/"
+        },
+        {
+          "type": "diagram",
+          "title": "O grafo de commits",
+          "cols": 12,
+          "rows": 8.6,
+          "nodes": [
+            {
+              "id": "A",
+              "label": "A",
+              "x": 0,
+              "y": 3.2,
+              "w": 2,
+              "h": 2
+            },
+            {
+              "id": "B",
+              "label": "B",
+              "x": 3.3,
+              "y": 3.2,
+              "w": 2,
+              "h": 2
+            },
+            {
+              "id": "C",
+              "label": "C",
+              "x": 6.6,
+              "y": 3.2,
+              "w": 2,
+              "h": 2,
+              "variant": "accent"
+            },
+            {
+              "id": "D",
+              "label": "D",
+              "x": 6.6,
+              "y": 6.6,
+              "w": 2,
+              "h": 2
+            },
+            {
+              "id": "E",
+              "label": "E",
+              "x": 9.9,
+              "y": 6.6,
+              "w": 2,
+              "h": 2
+            },
+            {
+              "id": "main",
+              "label": "main",
+              "x": 6.6,
+              "y": 0,
+              "w": 2,
+              "h": 1.4,
+              "variant": "dashed"
+            },
+            {
+              "id": "head",
+              "label": "HEAD",
+              "x": 9.9,
+              "y": 0,
+              "w": 2,
+              "h": 1.4,
+              "variant": "dashed"
+            },
+            {
+              "id": "feat",
+              "label": "feature",
+              "x": 9.9,
+              "y": 3.5,
+              "w": 2,
+              "h": 1.4,
+              "variant": "dashed"
+            }
+          ],
+          "edges": [
+            {
+              "from": "B",
+              "to": "A"
+            },
+            {
+              "from": "C",
+              "to": "B"
+            },
+            {
+              "from": "D",
+              "to": "B"
+            },
+            {
+              "from": "E",
+              "to": "D"
+            },
+            {
+              "from": "main",
+              "to": "C",
+              "accent": true
+            },
+            {
+              "from": "head",
+              "to": "main",
+              "accent": true
+            },
+            {
+              "from": "feat",
+              "to": "E",
+              "accent": true
+            }
+          ],
+          "groups": [],
+          "caption": "Setas de commit apontam do filho para o **pai** — é assim que o Git armazena. Refs (tracejadas) são só ponteiros móveis."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Um commit novo em `main` cria `F` com pai `C` e **move** `main` para `F`.",
+            "`HEAD` normalmente aponta para uma branch. Se apontar direto para um commit, você está em **detached HEAD**.",
+            "Tags leves são refs que não se movem; tags anotadas são objetos com metadados."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "areas",
+      "title": "Working tree, index e repositório",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O Git mantém três versões dos seus arquivos ao mesmo tempo. Entender qual comando mexe em qual delas elimina a maior parte da confusão."
+        },
+        {
+          "type": "diagram",
+          "title": "As três áreas",
+          "cols": 12,
+          "rows": 7.6,
+          "nodes": [
+            {
+              "id": "wt",
+              "label": "Working tree",
+              "x": 0,
+              "y": 0,
+              "w": 4.5,
+              "h": 2.4,
+              "sub": "seus arquivos"
+            },
+            {
+              "id": "idx",
+              "label": "Index",
+              "x": 7.5,
+              "y": 0,
+              "w": 4.5,
+              "h": 2.4,
+              "sub": "próximo commit"
+            },
+            {
+              "id": "repo",
+              "label": "Repositório",
+              "x": 3.5,
+              "y": 5.2,
+              "w": 5,
+              "h": 2.4,
+              "sub": ".git/objects",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "wt",
+              "to": "idx",
+              "label": "add"
+            },
+            {
+              "from": "idx",
+              "to": "repo",
+              "label": "commit"
+            },
+            {
+              "from": "repo",
+              "to": "wt",
+              "dashed": true,
+              "label": "restore · switch"
+            }
+          ],
+          "groups": []
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Comando",
+            "O que muda"
+          ],
+          "rows": [
+            [
+              "`git add`",
+              "Grava blobs e atualiza o index"
+            ],
+            [
+              "`git commit`",
+              "Cria tree + commit a partir do index e move a branch"
+            ],
+            [
+              "`git restore arq`",
+              "Working tree ← index"
+            ],
+            [
+              "`git restore --staged arq`",
+              "Index ← HEAD"
+            ],
+            [
+              "`git reset --soft X`",
+              "Move a branch; index e arquivos intactos"
+            ],
+            [
+              "`git reset --hard X`",
+              "Move a branch e sobrescreve index **e** arquivos"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "`reset --hard` descarta mudanças **não commitadas** sem volta — elas nunca viraram objetos. Mudanças commitadas, por outro lado, ainda são recuperáveis pelo reflog."
+        }
+      ]
+    },
+    {
+      "id": "merge-rebase",
+      "title": "Merge vs. rebase",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Os dois integram trabalho de branches diferentes; a diferença está no **histórico** resultante."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Merge** cria um commit novo com **dois pais**. Nada existente muda — o histórico mostra que houve trabalho paralelo.",
+            "**Rebase** reaplica seus commits, um a um, sobre outra base. Como o pai muda, o hash muda: são **commits novos**."
+          ]
+        },
+        {
+          "type": "diagram",
+          "title": "Rebase reescreve commits",
+          "cols": 12,
+          "rows": 13,
+          "nodes": [
+            {
+              "id": "b1",
+              "label": "B",
+              "x": 0.5,
+              "y": 1.4,
+              "w": 2,
+              "h": 1.8
+            },
+            {
+              "id": "c1",
+              "label": "C",
+              "x": 3.5,
+              "y": 1.4,
+              "w": 2,
+              "h": 1.8,
+              "sub": "main"
+            },
+            {
+              "id": "d1",
+              "label": "D",
+              "x": 3.5,
+              "y": 3.9,
+              "w": 2,
+              "h": 1.8
+            },
+            {
+              "id": "e1",
+              "label": "E",
+              "x": 6.5,
+              "y": 3.9,
+              "w": 2,
+              "h": 1.8,
+              "sub": "feature"
+            },
+            {
+              "id": "b2",
+              "label": "B",
+              "x": 0.5,
+              "y": 8.6,
+              "w": 2,
+              "h": 1.8
+            },
+            {
+              "id": "c2",
+              "label": "C",
+              "x": 3.5,
+              "y": 8.6,
+              "w": 2,
+              "h": 1.8,
+              "sub": "main"
+            },
+            {
+              "id": "d2",
+              "label": "D'",
+              "x": 6.5,
+              "y": 8.6,
+              "w": 2,
+              "h": 1.8,
+              "variant": "accent"
+            },
+            {
+              "id": "e2",
+              "label": "E'",
+              "x": 9.5,
+              "y": 8.6,
+              "w": 2,
+              "h": 1.8,
+              "sub": "feature",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "c1",
+              "to": "b1"
+            },
+            {
+              "from": "d1",
+              "to": "b1"
+            },
+            {
+              "from": "e1",
+              "to": "d1"
+            },
+            {
+              "from": "c2",
+              "to": "b2"
+            },
+            {
+              "from": "d2",
+              "to": "c2"
+            },
+            {
+              "from": "e2",
+              "to": "d2"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Antes",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 6.2
+            },
+            {
+              "label": "Depois de git rebase main",
+              "x": 0,
+              "y": 7.2,
+              "w": 12,
+              "h": 5.8
+            }
+          ],
+          "caption": "`D'` e `E'` têm o mesmo diff que `D` e `E`, mas são objetos diferentes. Os originais continuam no banco até o garbage collector removê-los."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Não faça rebase de commits que outras pessoas já baixaram. Elas continuam tendo `D` e `E`, e o próximo pull vai misturar as duas versões do histórico.",
+          "title": "Regra de ouro"
+        }
+      ]
+    },
+    {
+      "id": "reflog",
+      "title": "Reflog: a rede de segurança",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Toda vez que `HEAD` ou uma branch se move, o Git anota no **reflog** (local, não é enviado no push). Se você \"perdeu\" commits num reset ou rebase, eles quase certamente ainda estão lá."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ git reflog\n7b1e2a4 HEAD@{0}: reset: moving to HEAD~3\ne2d9f10 HEAD@{1}: commit: corrige validação\n...\n$ git reset --hard HEAD@{1}   # volta para antes do reset\n# ou, sem mexer na branch atual:\n$ git branch resgate e2d9f10",
+          "file": "recuperando commits"
+        },
+        {
+          "type": "p",
+          "text": "Entradas do reflog expiram (por padrão 90 dias para commits alcançáveis e 30 para inalcançáveis), e o `git gc` só remove objetos que nenhuma ref nem reflog alcança."
+        }
+      ]
+    },
+    {
+      "id": "armazenamento",
+      "title": "Como o Git armazena",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Objetos novos são gravados como arquivos **loose**, comprimidos com zlib, em `.git/objects/ab/cdef…` (os dois primeiros caracteres do hash viram diretório)."
+        },
+        {
+          "type": "p",
+          "text": "Periodicamente (ou no `push`/`fetch`), o Git agrupa objetos em **packfiles**, onde versões parecidas de um arquivo são guardadas como **deltas** umas das outras. É por isso que um histórico longo ocupa bem menos que a soma dos snapshots."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ git count-objects -vH      # loose vs. packed\n$ git gc                     # compacta e remove o que é inalcançável\n$ git verify-pack -v .git/objects/pack/*.idx | head",
+          "file": "manutenção"
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "blob",
+              "def": "Objeto com o conteúdo de um arquivo."
+            },
+            {
+              "term": "tree",
+              "def": "Objeto que lista um diretório."
+            },
+            {
+              "term": "commit",
+              "def": "Objeto que aponta para uma tree e para seus pais, com metadados."
+            },
+            {
+              "term": "ref",
+              "def": "Nome legível que aponta para um objeto (branch, tag, remote)."
+            },
+            {
+              "term": "HEAD",
+              "def": "Ref simbólica: \"onde você está agora\"."
+            },
+            {
+              "term": "index",
+              "def": "Área de preparação: o snapshot que vira o próximo commit."
+            },
+            {
+              "term": "detached HEAD",
+              "def": "Estado em que HEAD aponta para um commit, não para uma branch."
+            },
+            {
+              "term": "reflog",
+              "def": "Histórico local de para onde HEAD e as branches já apontaram."
+            },
+            {
+              "term": "packfile",
+              "def": "Arquivo que agrupa objetos comprimidos com deltas."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

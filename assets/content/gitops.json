@@ -1,0 +1,1038 @@
+{
+  "id": "gitops",
+  "title": "GitOps",
+  "summary": "Operar infraestrutura e aplicações tendo o Git como fonte da verdade e agentes que reconciliam o cluster continuamente.",
+  "category": "DevOps",
+  "level": "Intermediário",
+  "minutes": 18,
+  "updated": "out 2026",
+  "tags": [
+    "kubernetes",
+    "argo cd",
+    "flux",
+    "cd",
+    "deploy",
+    "kustomize",
+    "helm",
+    "infraestrutura como código",
+    "drift",
+    "reconciliação"
+  ],
+  "sections": [
+    {
+      "id": "visao-geral",
+      "title": "Visão geral",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**GitOps** é um modelo operacional em que o estado desejado de um sistema — aplicações, configuração e infraestrutura — é descrito de forma **declarativa** em um repositório Git, e **agentes automatizados** garantem continuamente que o ambiente real corresponda a esse estado."
+        },
+        {
+          "type": "p",
+          "text": "O termo foi cunhado pela Weaveworks em 2017. Hoje os princípios são mantidos pelo projeto **OpenGitOps**, do grupo de trabalho de GitOps da CNCF."
+        },
+        {
+          "type": "p",
+          "text": "A ideia central é simples: em vez de alguém (ou um pipeline) empurrar mudanças para o cluster, você altera o Git — por meio de commits e pull requests — e o próprio ambiente puxa e aplica o que mudou."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "GitOps não é uma ferramenta, é um conjunto de práticas. Argo CD e Flux são as implementações mais comuns para Kubernetes, mas o modelo vale para qualquer sistema que aceite configuração declarativa.",
+          "title": "Em uma frase"
+        },
+        {
+          "type": "h",
+          "text": "O que você ganha"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Auditoria grátis** — todo deploy é um commit: quem mudou, o quê, quando e por quê (na mensagem e no PR).",
+            "**Rollback trivial** — voltar uma versão é `git revert`.",
+            "**Menos credenciais expostas** — o CI não precisa de acesso de escrita ao cluster.",
+            "**Detecção de drift** — mudanças manuais no cluster são detectadas e, se você quiser, desfeitas automaticamente.",
+            "**Recuperação de desastre** — um cluster novo apontado para o mesmo repositório converge para o mesmo estado."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "principios",
+      "title": "Os quatro princípios",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O OpenGitOps define quatro princípios. Um sistema só é \"GitOps\" de verdade quando atende aos quatro:"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Declarativo",
+              "text": "O estado desejado é expresso **declarativamente** — você descreve o quê (\"3 réplicas da imagem v1.4.2\"), não como chegar lá (\"rode estes comandos\")."
+            },
+            {
+              "title": "Versionado e imutável",
+              "text": "O estado desejado é armazenado de forma que garanta **imutabilidade, versionamento** e histórico completo. Git é a escolha natural: cada commit é um snapshot endereçado por hash."
+            },
+            {
+              "title": "Puxado automaticamente",
+              "text": "Agentes de software **puxam** automaticamente as declarações a partir da fonte. Ninguém roda `kubectl apply` de fora."
+            },
+            {
+              "title": "Reconciliado continuamente",
+              "text": "Agentes **observam** continuamente o estado real e tentam aplicar o estado desejado. Não é um evento único de deploy — é um loop que nunca para."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Os princípios 3 e 4 são o que diferencia GitOps de \"infraestrutura como código num repositório\". Ter YAML no Git e rodar `kubectl apply` no CI é IaC versionado, mas não é GitOps."
+        }
+      ]
+    },
+    {
+      "id": "arquitetura",
+      "title": "Arquitetura de ponta a ponta",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Na prática, a maioria das equipes separa dois repositórios (ou duas áreas de um monorepo): o **código da aplicação** e a **configuração de deploy**. O CI continua existindo — ele só deixa de fazer deploy."
+        },
+        {
+          "type": "diagram",
+          "title": "Fluxo GitOps típico",
+          "cols": 12,
+          "rows": 17.5,
+          "nodes": [
+            {
+              "id": "dev",
+              "label": "Dev",
+              "x": 0,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "git push"
+            },
+            {
+              "id": "app",
+              "label": "Repo da app",
+              "x": 7,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "código-fonte"
+            },
+            {
+              "id": "reg",
+              "label": "Registry",
+              "x": 0,
+              "y": 4,
+              "w": 5,
+              "h": 2,
+              "sub": "imagem:1.4.2"
+            },
+            {
+              "id": "ci",
+              "label": "CI",
+              "x": 7,
+              "y": 4,
+              "w": 5,
+              "h": 2,
+              "sub": "build · test"
+            },
+            {
+              "id": "cfg",
+              "label": "Repo de config",
+              "x": 7,
+              "y": 8,
+              "w": 5,
+              "h": 2,
+              "sub": "manifests",
+              "variant": "accent"
+            },
+            {
+              "id": "api",
+              "label": "API Server",
+              "x": 0.6,
+              "y": 13.2,
+              "w": 4.6,
+              "h": 2.4,
+              "sub": "estado real"
+            },
+            {
+              "id": "agent",
+              "label": "Agente GitOps",
+              "x": 6.8,
+              "y": 13.2,
+              "w": 4.6,
+              "h": 2.4,
+              "sub": "Argo CD · Flux",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "dev",
+              "to": "app",
+              "label": "push"
+            },
+            {
+              "from": "app",
+              "to": "ci",
+              "label": "dispara"
+            },
+            {
+              "from": "ci",
+              "to": "reg",
+              "label": "publica"
+            },
+            {
+              "from": "ci",
+              "to": "cfg",
+              "label": "PR: nova tag"
+            },
+            {
+              "from": "agent",
+              "to": "cfg",
+              "accent": true,
+              "dashed": true,
+              "label": "pull"
+            },
+            {
+              "from": "agent",
+              "to": "api",
+              "accent": true,
+              "label": "aplica"
+            },
+            {
+              "from": "api",
+              "to": "reg",
+              "dashed": true,
+              "label": "baixa imagem"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Cluster Kubernetes",
+              "x": 0,
+              "y": 11.6,
+              "w": 12,
+              "h": 5.6,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "O CI termina escrevendo no Git. Quem toca o cluster é só o agente, que roda **dentro** dele."
+        },
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            "O dev faz push de código no repositório da aplicação.",
+            "O CI roda testes, gera a imagem e publica no registry com uma tag imutável (ex.: `1.4.2` ou o SHA do commit).",
+            "O CI (ou uma ferramenta de automação de imagens) abre um PR no repositório de config trocando a tag.",
+            "Após o merge, o agente no cluster detecta o novo commit, calcula a diferença e aplica.",
+            "O agente segue observando: se algo divergir depois, ele reporta ou corrige."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Evite tags mutáveis como `latest` no repositório de config. Se a tag não muda, o Git não muda — e o agente não tem como saber que deveria fazer algo. Além disso, você perde a capacidade de saber exatamente o que está rodando."
+        }
+      ]
+    },
+    {
+      "id": "push-vs-pull",
+      "title": "Push vs. pull",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A diferença mais importante entre CD tradicional e GitOps é a **direção** do fluxo de deploy."
+        },
+        {
+          "type": "diagram",
+          "title": "Dois modelos de deploy",
+          "cols": 12,
+          "rows": 12.6,
+          "nodes": [
+            {
+              "id": "ci",
+              "label": "Pipeline CI",
+              "x": 0.5,
+              "y": 1.6,
+              "w": 4,
+              "h": 2.6,
+              "sub": "com credencial"
+            },
+            {
+              "id": "k1",
+              "label": "Cluster",
+              "x": 7.5,
+              "y": 1.6,
+              "w": 4,
+              "h": 2.6,
+              "sub": "recebe ordens"
+            },
+            {
+              "id": "git",
+              "label": "Git",
+              "x": 0.5,
+              "y": 8.6,
+              "w": 4,
+              "h": 2.6,
+              "sub": "estado desejado"
+            },
+            {
+              "id": "k2",
+              "label": "Agente no cluster",
+              "x": 7.5,
+              "y": 8.6,
+              "w": 4,
+              "h": 2.6,
+              "sub": "só lê o Git",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "ci",
+              "to": "k1",
+              "label": "apply"
+            },
+            {
+              "from": "k2",
+              "to": "git",
+              "accent": true,
+              "label": "pull"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Push · CD tradicional",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 5.4
+            },
+            {
+              "label": "Pull · GitOps",
+              "x": 0,
+              "y": 7,
+              "w": 12,
+              "h": 5.6
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Push (CI aplica)",
+            "Pull (GitOps)"
+          ],
+          "rows": [
+            [
+              "Credenciais",
+              "CI precisa de acesso de escrita a cada cluster",
+              "Ficam dentro do cluster; o CI só escreve no Git"
+            ],
+            [
+              "Fonte da verdade",
+              "O que o último pipeline aplicou",
+              "O repositório Git"
+            ],
+            [
+              "Drift",
+              "Invisível até o próximo deploy",
+              "Detectado e corrigido continuamente"
+            ],
+            [
+              "Rollback",
+              "Re-executar um pipeline antigo",
+              "`git revert`"
+            ],
+            [
+              "Auditoria",
+              "Logs do CI (com retenção limitada)",
+              "Histórico do Git + PRs"
+            ],
+            [
+              "Rede",
+              "CI precisa alcançar o API server",
+              "Cluster só precisa sair para o Git"
+            ],
+            [
+              "Multi-cluster",
+              "Pipeline conhece todos os clusters",
+              "Cada cluster puxa a própria config"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O modelo pull também simplifica clusters em redes privadas: como a conexão é de **saída** (cluster → Git), você não precisa expor o API server para o seu provedor de CI."
+        }
+      ]
+    },
+    {
+      "id": "reconciliacao",
+      "title": "O loop de reconciliação",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O coração do GitOps é um **controlador** no estilo Kubernetes: um loop que compara o estado desejado com o observado e age para eliminar a diferença."
+        },
+        {
+          "type": "diagram",
+          "title": "Reconciliação",
+          "cols": 12,
+          "rows": 10,
+          "nodes": [
+            {
+              "id": "git",
+              "label": "Desejado",
+              "x": 0,
+              "y": 0,
+              "w": 4.5,
+              "h": 2.4,
+              "sub": "Git @ commit"
+            },
+            {
+              "id": "live",
+              "label": "Real",
+              "x": 7.5,
+              "y": 0,
+              "w": 4.5,
+              "h": 2.4,
+              "sub": "objetos no cluster"
+            },
+            {
+              "id": "diff",
+              "label": "Diff",
+              "x": 3.5,
+              "y": 4.6,
+              "w": 5,
+              "h": 2.4,
+              "sub": "comparar e decidir",
+              "variant": "accent"
+            },
+            {
+              "id": "manual",
+              "label": "Mudança manual",
+              "x": 7.5,
+              "y": 7.8,
+              "w": 4.5,
+              "h": 2,
+              "sub": "kubectl edit",
+              "variant": "dashed"
+            }
+          ],
+          "edges": [
+            {
+              "from": "git",
+              "to": "diff",
+              "label": "lê"
+            },
+            {
+              "from": "diff",
+              "to": "live",
+              "both": true,
+              "accent": true,
+              "label": "observa · sync"
+            },
+            {
+              "from": "manual",
+              "to": "live",
+              "dashed": true,
+              "label": "drift"
+            }
+          ],
+          "groups": []
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Buscar",
+              "text": "O agente obtém a revisão alvo do Git (por polling periódico ou ao receber um webhook) e renderiza os manifests — YAML puro, Kustomize ou Helm."
+            },
+            {
+              "title": "Comparar",
+              "text": "Compara cada objeto renderizado com o que existe no cluster. O resultado é um status: **Synced** ou **OutOfSync**."
+            },
+            {
+              "title": "Agir",
+              "text": "Se houver diferença e o sync automático estiver ligado, aplica as mudanças. Com `prune`, também remove objetos que saíram do Git."
+            },
+            {
+              "title": "Reportar",
+              "text": "Publica status e saúde (ex.: Deployment com todas as réplicas prontas) e pode notificar Slack, e-mail ou o próprio commit."
+            }
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Drift e auto-correção"
+        },
+        {
+          "type": "p",
+          "text": "**Drift** é quando o estado real diverge do Git sem um commit — tipicamente alguém rodou `kubectl scale` ou editou um ConfigMap na mão durante um incidente. Com auto-correção (`selfHeal` no Argo CD; comportamento padrão no Flux a cada intervalo), o agente reverte a mudança."
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Réplicas após uma mudança manual",
+          "xLabel": "tempo (min)",
+          "yLabel": "RÉPLICAS",
+          "yMax": 4,
+          "series": [
+            {
+              "name": "Desejado (Git)",
+              "tone": "muted",
+              "dashed": true,
+              "points": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  20,
+                  3
+                ]
+              ]
+            },
+            {
+              "name": "Sem auto-correção",
+              "tone": "primary",
+              "points": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  3
+                ],
+                [
+                  5,
+                  1
+                ],
+                [
+                  15,
+                  1
+                ],
+                [
+                  15,
+                  3
+                ],
+                [
+                  20,
+                  3
+                ]
+              ]
+            },
+            {
+              "name": "Com auto-correção",
+              "tone": "accent",
+              "points": [
+                [
+                  0,
+                  3
+                ],
+                [
+                  5,
+                  3
+                ],
+                [
+                  5,
+                  1
+                ],
+                [
+                  5.5,
+                  3
+                ],
+                [
+                  20,
+                  3
+                ]
+              ]
+            }
+          ],
+          "caption": "Ilustrativo. No minuto 5 alguém reduz o Deployment para 1 réplica. Com auto-correção, o agente restaura 3 réplicas quase imediatamente; sem ela, o cluster fica divergente até um sync manual (minuto 15). Toque ou arraste no gráfico para ver os valores."
+        },
+        {
+          "type": "h",
+          "text": "Quão rápido o agente percebe um commit?"
+        },
+        {
+          "type": "p",
+          "text": "Depende de como ele descobre mudanças. Por padrão, o Argo CD consulta os repositórios a cada **3 minutos**; no Flux, cada `GitRepository` declara o próprio `interval`. Webhooks do provedor Git eliminam essa espera."
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Janela máxima até detectar um novo commit",
+          "unit": "s",
+          "bars": [
+            {
+              "label": "Webhook do provedor Git",
+              "value": 5,
+              "display": "segundos"
+            },
+            {
+              "label": "Argo CD · polling padrão",
+              "value": 180,
+              "display": "3 min"
+            },
+            {
+              "label": "Flux · interval: 5m (exemplo)",
+              "value": 300,
+              "display": "5 min"
+            },
+            {
+              "label": "Flux · interval: 10m (exemplo)",
+              "value": 600,
+              "display": "10 min"
+            }
+          ],
+          "caption": "Valores de configuração (pior caso), não medições. O tempo total de deploy ainda inclui renderização, aplicação e rollout dos pods."
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Use webhooks para latência baixa **e** mantenha o polling como rede de segurança. Webhooks se perdem; o polling garante que o sistema converge mesmo assim."
+        }
+      ]
+    },
+    {
+      "id": "estrutura",
+      "title": "Estruturando o repositório",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Não existe layout único, mas um padrão muito usado é **base + overlays** com Kustomize: a base descreve a aplicação, e cada ambiente aplica só as diferenças."
+        },
+        {
+          "type": "code",
+          "lang": "tree",
+          "code": "platform-config/\n├── apps/\n│   └── checkout/\n│       ├── base/\n│       │   ├── deployment.yaml\n│       │   ├── service.yaml\n│       │   └── kustomization.yaml\n│       └── overlays/\n│           ├── dev/\n│           ├── staging/\n│           └── prod/\n│               └── kustomization.yaml\n└── clusters/\n    ├── dev/        # o que cada cluster instala\n    ├── staging/\n    └── prod/",
+          "file": "estrutura do repositório"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../base\nimages:\n  - name: ghcr.io/acme/checkout\n    newTag: \"1.4.2\"   # o CI só altera esta linha\nreplicas:\n  - name: checkout\n    count: 4",
+          "file": "apps/checkout/overlays/prod/kustomization.yaml"
+        },
+        {
+          "type": "h",
+          "text": "Monorepo ou um repositório por ambiente?"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Abordagem",
+            "Prós",
+            "Contras"
+          ],
+          "rows": [
+            [
+              "Pastas por ambiente (monorepo)",
+              "Promoção visível em um único diff; fácil de comparar ambientes",
+              "Permissões mais grossas; um PR pode afetar prod por engano"
+            ],
+            [
+              "Repo por ambiente",
+              "Permissões e aprovação por ambiente; isolamento forte",
+              "Promoção vira PR entre repositórios; mais difícil de comparar"
+            ],
+            [
+              "Branch por ambiente",
+              "Parece natural no Git",
+              "Merges entre branches divergem e acumulam conflitos — geralmente desaconselhado"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Branches por ambiente (`dev`, `staging`, `prod`) costumam virar um pesadelo: os branches divergem em coisas que não deveriam ser promovidas e cada merge vira negociação. Prefira **pastas** por ambiente em um único branch."
+        }
+      ]
+    },
+    {
+      "id": "ferramentas",
+      "title": "Argo CD e Flux na prática",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "As duas ferramentas são projetos **graduados** da CNCF e resolvem o mesmo problema com filosofias diferentes."
+        },
+        {
+          "type": "h",
+          "text": "Argo CD"
+        },
+        {
+          "type": "p",
+          "text": "A unidade principal é a `Application`: \"pegue este caminho deste repositório e mantenha-o sincronizado neste cluster/namespace\"."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: checkout-prod\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/acme/platform-config.git\n    targetRevision: main\n    path: apps/checkout/overlays/prod\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: checkout\n  syncPolicy:\n    automated:\n      prune: true      # remove o que saiu do Git\n      selfHeal: true   # desfaz mudanças manuais\n    syncOptions:\n      - CreateNamespace=true",
+          "file": "checkout-prod.yaml"
+        },
+        {
+          "type": "h",
+          "text": "Flux"
+        },
+        {
+          "type": "p",
+          "text": "O Flux é composto por controladores especializados. Uma **fonte** (`GitRepository`) diz de onde vem o conteúdo; uma `Kustomization` diz o que aplicar a partir dela."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: source.toolkit.fluxcd.io/v1\nkind: GitRepository\nmetadata:\n  name: platform-config\n  namespace: flux-system\nspec:\n  interval: 1m\n  url: https://github.com/acme/platform-config\n  ref:\n    branch: main\n---\napiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: checkout-prod\n  namespace: flux-system\nspec:\n  interval: 10m\n  path: ./apps/checkout/overlays/prod\n  prune: true\n  sourceRef:\n    kind: GitRepository\n    name: platform-config",
+          "file": "checkout-prod.yaml"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Argo CD",
+            "Flux"
+          ],
+          "rows": [
+            [
+              "Interface",
+              "UI web rica + CLI",
+              "CLI e CRDs; UIs de terceiros"
+            ],
+            [
+              "Modelo",
+              "`Application` e `ApplicationSet`",
+              "Controladores: source, kustomize, helm, notification"
+            ],
+            [
+              "Multi-tenancy",
+              "`AppProject` + RBAC próprio",
+              "RBAC do Kubernetes com impersonation"
+            ],
+            [
+              "Helm",
+              "Renderiza templates e aplica o resultado",
+              "`HelmRelease` faz install/upgrade reais com o SDK do Helm"
+            ],
+            [
+              "Atualizar imagens",
+              "Argo CD Image Updater (projeto à parte)",
+              "Controladores de image automation"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Regra prática: equipes que querem uma **UI** para visualizar e operar aplicações tendem ao Argo CD; equipes que preferem tudo como CRDs e composição de controladores tendem ao Flux. Ambos são escolhas sólidas."
+        }
+      ]
+    },
+    {
+      "id": "promocao",
+      "title": "Promoção entre ambientes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Promover uma versão é **um PR que copia a tag** de um ambiente para o próximo. O mesmo artefato imutável passa por todos os ambientes — você nunca rebuilda para prod."
+        },
+        {
+          "type": "diagram",
+          "title": "Promoção por pull request",
+          "cols": 12,
+          "rows": 9,
+          "nodes": [
+            {
+              "id": "odev",
+              "label": "overlays/dev",
+              "x": 0,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "tag 1.4.2"
+            },
+            {
+              "id": "cdev",
+              "label": "Cluster dev",
+              "x": 7,
+              "y": 0,
+              "w": 5,
+              "h": 2
+            },
+            {
+              "id": "ostg",
+              "label": "overlays/staging",
+              "x": 0,
+              "y": 3.5,
+              "w": 5,
+              "h": 2,
+              "sub": "tag 1.4.2"
+            },
+            {
+              "id": "cstg",
+              "label": "Cluster staging",
+              "x": 7,
+              "y": 3.5,
+              "w": 5,
+              "h": 2
+            },
+            {
+              "id": "oprd",
+              "label": "overlays/prod",
+              "x": 0,
+              "y": 7,
+              "w": 5,
+              "h": 2,
+              "sub": "PR + aprovação",
+              "variant": "accent"
+            },
+            {
+              "id": "cprd",
+              "label": "Cluster prod",
+              "x": 7,
+              "y": 7,
+              "w": 5,
+              "h": 2,
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "odev",
+              "to": "cdev",
+              "label": "sync"
+            },
+            {
+              "from": "ostg",
+              "to": "cstg",
+              "label": "sync"
+            },
+            {
+              "from": "oprd",
+              "to": "cprd",
+              "accent": true,
+              "label": "sync"
+            },
+            {
+              "from": "odev",
+              "to": "ostg",
+              "label": "PR"
+            },
+            {
+              "from": "ostg",
+              "to": "oprd",
+              "label": "PR"
+            }
+          ],
+          "groups": []
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# no pipeline da app, depois de publicar a imagem\n$ cd platform-config/apps/checkout/overlays/staging\n$ kustomize edit set image ghcr.io/acme/checkout:1.4.2\n$ git commit -am \"checkout(staging): 1.4.2\"\n$ git push origin HEAD:promote/checkout-1.4.2   # abre o PR",
+          "file": "promover para staging"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Proteja o caminho de **prod** com CODEOWNERS e aprovação obrigatória.",
+            "Rode validação no PR: `kustomize build`, schemas (kubeconform) e políticas (OPA/Kyverno).",
+            "Mostre o diff renderizado no PR — revisar YAML final é mais seguro que revisar só a tag."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "segredos",
+      "title": "Segredos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Se tudo vive no Git, onde ficam as senhas? **Nunca** em texto puro — um `Secret` do Kubernetes é só base64, que não é criptografia. Há três estratégias principais:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Estratégia",
+            "Como funciona",
+            "Bom para"
+          ],
+          "rows": [
+            [
+              "Sealed Secrets",
+              "Você cifra com a chave pública do controller; só ele decifra dentro do cluster",
+              "Setups simples, sem cofre externo"
+            ],
+            [
+              "SOPS",
+              "Cifra só os valores do YAML com age, PGP ou KMS; o agente decifra na aplicação",
+              "Quem quer o segredo cifrado no Git com chaves gerenciadas"
+            ],
+            [
+              "External Secrets Operator",
+              "O Git guarda só uma **referência**; o operador busca o valor no cofre",
+              "Quem já usa Vault, AWS/GCP/Azure secret managers"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ kubectl create secret generic db-creds \\\n    --from-literal=password=s3cr3t --dry-run=client -o yaml \\\n  | kubeseal --format yaml > db-creds.sealed.yaml\n$ git add db-creds.sealed.yaml   # seguro: só o controller decifra",
+          "file": "Sealed Secrets"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: external-secrets.io/v1\nkind: ExternalSecret\nmetadata:\n  name: db-creds\nspec:\n  refreshInterval: 1h\n  secretStoreRef:\n    kind: ClusterSecretStore\n    name: aws-secrets\n  target:\n    name: db-creds        # Secret criado no cluster\n  data:\n    - secretKey: password\n      remoteRef:\n        key: prod/checkout/db\n        property: password",
+          "file": "External Secrets Operator"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Um segredo commitado em texto puro continua no histórico do Git mesmo depois de apagado. Considere-o vazado: **revogue e gere outro** — reescrever o histórico não basta, porque clones e forks já têm a cópia."
+        }
+      ]
+    },
+    {
+      "id": "rollback",
+      "title": "Rollback e incidentes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Como o estado desejado é o Git, voltar atrás é desfazer um commit. O agente cuida do resto."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ git log --oneline -- apps/checkout/overlays/prod\n3f9c2e1 checkout(prod): 1.4.2\na17b9d0 checkout(prod): 1.4.1\n$ git revert 3f9c2e1 && git push\n# o agente detecta o commit e reconcilia para 1.4.1",
+          "file": "rollback via git"
+        },
+        {
+          "type": "h",
+          "text": "E durante um incidente?"
+        },
+        {
+          "type": "p",
+          "text": "Às vezes você precisa agir no cluster **agora**, mais rápido do que um PR permite. Com auto-correção ligada, o agente vai desfazer sua mudança manual. Opções:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Faça o hotfix pelo Git** com um caminho de aprovação expresso — mantém o histórico íntegro.",
+            "**Pause o sync** da aplicação, aja manualmente e depois leve a mudança para o Git antes de reativar.",
+            "Registre o desvio: qualquer mudança fora do Git que não volta para ele vira drift permanente."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "`prune: true` é poderoso: mover arquivos de lugar ou errar um `path` pode fazer o agente **apagar** recursos. Use proteções como anotações de \"não podar\" em recursos críticos (ex.: PersistentVolumeClaims) e revise diffs com atenção."
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Tags mutáveis** (`latest`, `stable`) — quebram a rastreabilidade e o agente não percebe mudanças.",
+            "**CI que ainda roda `kubectl apply`** \"só para um caso\" — duas fontes da verdade brigando.",
+            "**Mudanças manuais sem volta ao Git** — o próximo sync apaga o seu fix de incidente.",
+            "**Repositório de config gigante sem dono** — use CODEOWNERS por pasta e mantenha a estrutura previsível.",
+            "**Helm com valores gerados no CI** — se o valor final não está no Git, o Git não é a fonte da verdade.",
+            "**Ignorar o status de saúde** — \"Synced\" significa que os objetos batem com o Git, não que a aplicação está saudável.",
+            "**Gerenciar o próprio agente fora do GitOps** — o Argo CD/Flux também deve ser instalado e atualizado a partir do Git (bootstrap)."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "Estado desejado",
+              "def": "A descrição declarativa, versionada no Git, de como o sistema deve estar."
+            },
+            {
+              "term": "Estado real (live)",
+              "def": "O que existe de fato no cluster neste momento."
+            },
+            {
+              "term": "Reconciliação",
+              "def": "O loop que compara desejado e real e age para eliminar diferenças."
+            },
+            {
+              "term": "Drift",
+              "def": "Divergência entre real e desejado causada por algo fora do Git."
+            },
+            {
+              "term": "Sync",
+              "def": "A operação de aplicar o estado desejado ao cluster."
+            },
+            {
+              "term": "Prune",
+              "def": "Remover do cluster recursos que não existem mais no Git."
+            },
+            {
+              "term": "Self-heal",
+              "def": "Reverter automaticamente mudanças manuais no cluster."
+            },
+            {
+              "term": "Overlay",
+              "def": "No Kustomize, um conjunto de patches por ambiente sobre uma base comum."
+            },
+            {
+              "term": "App of apps",
+              "def": "Padrão em que uma aplicação do agente gerencia outras aplicações — útil para bootstrap de clusters."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "checklist",
+      "title": "Checklist de adoção",
+      "blocks": [
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            "Escolha o agente (Argo CD ou Flux) e instale-o **via Git** (bootstrap).",
+            "Defina a estrutura do repositório de config: base + overlays por ambiente.",
+            "Faça o CI publicar imagens com **tags imutáveis** e abrir PRs de atualização.",
+            "Remova credenciais de escrita do cluster do CI.",
+            "Escolha a estratégia de segredos antes do primeiro deploy real.",
+            "Ative sync automático em dev; em prod, comece com sync manual e evolua para automático + self-heal.",
+            "Configure webhooks, notificações e alertas de **OutOfSync** e **Degraded**.",
+            "Documente o procedimento de incidente (pausar sync, hotfix pelo Git)."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Comece por um serviço pouco crítico em dev. GitOps muda hábitos da equipe tanto quanto muda ferramentas — o processo de PR e revisão é parte do sistema."
+        }
+      ]
+    }
+  ]
+}
