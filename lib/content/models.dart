@@ -15,6 +15,8 @@ class Topic {
     required this.updated,
     required this.tags,
     required this.sections,
+    this.series,
+    this.part,
   });
 
   final String id;
@@ -27,6 +29,11 @@ class Topic {
   final List<String> tags;
   final List<Section> sections;
 
+  /// Guias longos são quebrados em partes: tópicos com o mesmo `series`
+  /// formam uma trilha ordenada por `part` (1, 2, 3…).
+  final String? series;
+  final int? part;
+
   factory Topic.fromJson(Json json) => Topic(
     id: json['id'] as String,
     title: json['title'] as String,
@@ -36,6 +43,8 @@ class Topic {
     minutes: json['minutes'] as int,
     updated: json['updated'] as String,
     tags: _strings(json['tags']),
+    series: json['series'] as String?,
+    part: json['part'] as int?,
     sections: [
       for (final s in json['sections'] as List) Section.fromJson(s as Json),
     ],
@@ -47,6 +56,7 @@ class Topic {
       title,
       summary,
       category,
+      ?series,
       ...tags,
       for (final s in sections) s.title,
     ].join(' '),

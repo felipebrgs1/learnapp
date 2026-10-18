@@ -124,19 +124,35 @@ final _json = <_Rule>[
   (RegExp(r'-?\b\d+(\.\d+)?\b'), _Tok.number),
 ];
 
+final _go = <_Rule>[
+  (RegExp(r'//.*|/\*[\s\S]*?\*/'), _Tok.comment),
+  (RegExp(r'"(\\.|[^"\\])*"' r"|`[^`]*`|'(\\.|[^'\\])+'"), _Tok.string),
+  (
+    RegExp(
+      r'\b(break|case|chan|const|continue|default|defer|else|fallthrough|for|func|go|goto|if|import|'
+      r'interface|map|package|range|return|select|struct|switch|type|var|nil|true|false|iota)\b',
+    ),
+    _Tok.keyword,
+  ),
+  (RegExp(r'\b\d+(\.\d+)?\b'), _Tok.number),
+  (RegExp(r'\b[A-Z]\w*(?=\s*[({])'), _Tok.key),
+  (RegExp(r':=|<-|[{}()\[\]]'), _Tok.punct),
+];
+
 final _tree = <_Rule>[
   (RegExp(r'#.*'), _Tok.comment),
   (RegExp(r'[│├└─]+'), _Tok.punct),
   (RegExp(r'[\w.-]+/'), _Tok.key),
 ];
 
-/// Realce léxico simples por regex: suficiente para YAML, shell e JSON
+/// Realce léxico simples por regex: suficiente para YAML, shell, JSON e Go
 /// curtos de documentação, sem dependências.
 TextSpan highlight(String code, String lang, AppColors c) {
   final rules = switch (lang) {
     'yaml' || 'yml' => _yaml,
     'bash' || 'sh' || 'shell' => _bash,
     'json' => _json,
+    'go' || 'golang' => _go,
     'tree' => _tree,
     _ => const <_Rule>[],
   };

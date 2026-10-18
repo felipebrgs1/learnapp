@@ -44,6 +44,18 @@ void main() {
     }
   });
 
+  test('séries têm partes 1..N sem buracos, em sequência no índice', () {
+    final repo = loadFromDisk();
+    for (final t in repo.topics.where((t) => t.series != null)) {
+      final parts = repo.seriesOf(t);
+      expect([for (final p in parts) p.part], [for (var i = 1; i <= parts.length; i++) i],
+          reason: 'série ${t.series}');
+      final first = repo.topics.indexOf(parts.first);
+      expect([for (final p in parts) repo.topics.indexOf(p) - first], [for (var i = 0; i < parts.length; i++) i],
+          reason: 'partes de ${t.series} fora de sequência no index.json');
+    }
+  });
+
   test('busca ignora acentos e combina termos', () {
     final repo = loadFromDisk();
     expect(repo.search('reconciliacao').map((t) => t.id), contains('gitops'));
@@ -67,7 +79,7 @@ void main() {
       // Rola até o fim para construir e pintar todos os blocos.
       await tester.drag(find.byType(SingleChildScrollView).first, const Offset(0, -100000));
       await tester.pumpAndSettle();
-      expect(tester.takeException(), isNull);
+      expect(tester.takeException(), isNull, reason: t.id);
       nav.pop();
       await tester.pumpAndSettle();
     }

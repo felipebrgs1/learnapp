@@ -48,6 +48,17 @@ transições são próprios.
 }
 ```
 
+### Séries (guias em partes)
+
+Guias longos são quebrados em partes. Tópicos com o mesmo `series` formam uma
+trilha: a lista mostra "PARTE n", a página do tópico ganha o selo "Parte n de N"
+e um navegador com todas as partes, e o rodapé aponta para a próxima parte.
+Liste as partes em sequência no `index.json`.
+
+```json
+{ "id": "kubernetes-2", "title": "Kubernetes 2 — Workloads…", "series": "Kubernetes", "part": 2, ... }
+```
+
 ### Tipos de bloco
 
 Texto aceita `**negrito**` e `` `código` `` inline.
@@ -57,7 +68,7 @@ Texto aceita `**negrito**` e `` `código` `` inline.
 | `p`       | `text` |
 | `h`       | `text` (subtítulo dentro da seção) |
 | `list`    | `items`, `ordered?` |
-| `code`    | `code`, `lang` (`yaml`, `bash`, `json`, `tree`, `text`), `file?` |
+| `code`    | `code`, `lang` (`yaml`, `bash`, `json`, `go`, `tree`, `text`), `file?` |
 | `callout` | `variant` (`note`, `tip`, `warning`, `danger`), `title?`, `text` |
 | `table`   | `headers`, `rows` (3+ colunas viram cartões em telas estreitas) |
 | `steps`   | `items: [{ title, text }]` |

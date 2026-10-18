@@ -1,3 +1,14 @@
 {
-  "topics": ["gitops.json", "git-internals.json"]
+  "topics": [
+    "gitops.json",
+    "git-internals.json",
+    "kubernetes-1.json",
+    "kubernetes-2.json",
+    "kubernetes-3.json",
+    "argocd-1.json",
+    "argocd-2.json",
+    "go-1.json",
+    "go-2.json",
+    "go-3.json"
+  ]
 }

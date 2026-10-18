@@ -280,7 +280,13 @@ class _TopicTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(topic.category.toUpperCase(), style: AppText.eyebrow.copyWith(color: c.textMuted, fontSize: 10.5)),
+                  Text(
+                    [
+                      topic.category.toUpperCase(),
+                      if (topic.part != null) 'PARTE ${topic.part}',
+                    ].join(' · '),
+                    style: AppText.eyebrow.copyWith(color: c.textMuted, fontSize: 10.5),
+                  ),
                   const SizedBox(height: 6),
                   Text(topic.title, style: AppText.h3.copyWith(color: c.text, fontSize: 17)),
                   const SizedBox(height: 4),

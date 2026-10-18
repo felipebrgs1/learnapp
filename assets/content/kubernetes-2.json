@@ -1,0 +1,1796 @@
+{
+  "id": "kubernetes-2",
+  "title": "Kubernetes 2 — Workloads, configuração e escala",
+  "summary": "Como descrever, configurar, agendar e escalar cargas de trabalho no Kubernetes: Pods, controladores, probes, recursos, ConfigMaps, afinidades e autoscaling.",
+  "category": "Infraestrutura",
+  "level": "Intermediário",
+  "minutes": 32,
+  "updated": "out 2026",
+  "tags": [
+    "kubernetes",
+    "k8s",
+    "pod",
+    "deployment",
+    "replicaset",
+    "statefulset",
+    "daemonset",
+    "job",
+    "cronjob",
+    "probes",
+    "liveness",
+    "readiness",
+    "hpa",
+    "autoscaling"
+  ],
+  "series": "Kubernetes",
+  "part": 2,
+  "sections": [
+    {
+      "id": "visao",
+      "title": "Visão geral",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Na parte 1 vimos **quem** compõe um cluster e como o loop de reconciliação funciona. Agora o foco é **o que você roda nele**: como descrever cargas de trabalho, como configurá-las, como dizer ao cluster quanto elas precisam e como fazê-las crescer e encolher sozinhas."
+        },
+        {
+          "type": "p",
+          "text": "Quase tudo aqui se resume a uma ideia: você nunca cria Pods à mão em produção. Você declara um **controlador** (Deployment, StatefulSet, DaemonSet, Job) que mantém Pods vivos segundo um molde (`template`), e declara **restrições** (recursos, probes, afinidades, orçamentos de disrupção) que o scheduler e o kubelet respeitam."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Os exemplos assumem Kubernetes 1.33 ou mais novo (em out 2026 as versões suportadas vão até a 1.37). Quando um recurso mudou de status recentemente, o texto avisa.",
+          "title": "Versões"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Pod**: a menor unidade agendável; um ou mais containers que compartilham rede e volumes.",
+            "**Controladores**: mantêm N Pods e decidem como atualizá-los.",
+            "**Probes e recursos**: contrato entre sua aplicação e o kubelet/scheduler.",
+            "**Escala**: HPA, VPA e autoscalers de nós ajustam réplicas, tamanho e capacidade."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pod",
+      "title": "Pod em profundidade",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um Pod é um conjunto de containers que **compartilham o mesmo network namespace** (um IP, um espaço de portas, `localhost` em comum) e podem compartilhar volumes. Eles são sempre agendados juntos no mesmo nó. Por baixo, o runtime cria uma sandbox (o antigo container `pause`) que segura os namespaces enquanto os containers vão e vêm."
+        },
+        {
+          "type": "p",
+          "text": "O Pod é **efêmero e descartável**: ele nunca é movido, apenas recriado em outro lugar com outro IP. Por isso nada deve depender do nome ou IP de um Pod específico, a não ser que você use um StatefulSet."
+        },
+        {
+          "type": "h",
+          "text": "Multi-container: quando faz sentido"
+        },
+        {
+          "type": "p",
+          "text": "Coloque dois containers no mesmo Pod só quando eles precisam **do mesmo ciclo de vida e da mesma rede**: um proxy de mTLS ao lado da app, um agente de logs lendo um volume, um adaptador de métricas. Se podem escalar ou falhar de forma independente, são Pods (e Deployments) separados."
+        },
+        {
+          "type": "h",
+          "text": "Init containers"
+        },
+        {
+          "type": "p",
+          "text": "Rodam **em sequência, até terminar com sucesso**, antes de qualquer container da aplicação iniciar. Servem para esperar dependências, rodar migrações, baixar arquivos ou ajustar permissões de volumes. Se um falha, o kubelet reexecuta conforme a `restartPolicy` do Pod."
+        },
+        {
+          "type": "h",
+          "text": "Sidecars nativos"
+        },
+        {
+          "type": "p",
+          "text": "Desde o Kubernetes 1.33 (GA), um init container com `restartPolicy: Always` vira um **sidecar nativo**: inicia na ordem dos init containers, **continua rodando** durante todo o Pod, é reiniciado se cair e é encerrado **depois** dos containers principais. Isso resolve dois problemas antigos: o sidecar de proxy que ainda não subiu quando a app começa, e o Job que nunca termina porque o sidecar segue vivo."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: web\nspec:\n  initContainers:\n    - name: wait-db\n      image: busybox:1.37\n      command: [\"sh\", \"-c\", \"until nc -z db 5432; do sleep 2; done\"]\n    - name: log-agent          # sidecar nativo\n      image: fluent/fluent-bit:4.0\n      restartPolicy: Always    # <- o que o torna sidecar\n      volumeMounts:\n        - { name: logs, mountPath: /var/log/app }\n  containers:\n    - name: app\n      image: ghcr.io/acme/web:1.4.2\n      volumeMounts:\n        - { name: logs, mountPath: /var/log/app }\n  volumes:\n    - name: logs\n      emptyDir: {}",
+          "file": "pod-sidecar.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Antes dos sidecars nativos, o padrão era listar o proxy em `containers` e torcer pela ordem de início. Ela nunca foi garantida. Prefira sempre `initContainers` + `restartPolicy: Always` para proxies, agentes de log e túneis.",
+          "title": "Dica"
+        },
+        {
+          "type": "h",
+          "text": "restartPolicy do Pod"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Valor",
+            "Comportamento",
+            "Uso típico"
+          ],
+          "rows": [
+            [
+              "`Always` (padrão)",
+              "Reinicia o container sempre que ele termina, com sucesso ou não",
+              "Deployments, StatefulSets, DaemonSets"
+            ],
+            [
+              "`OnFailure`",
+              "Reinicia só se o exit code for diferente de 0",
+              "Jobs"
+            ],
+            [
+              "`Never`",
+              "Nunca reinicia; o Pod termina em `Succeeded` ou `Failed`",
+              "Jobs que devem deixar rastro de cada tentativa"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Reinícios usam **backoff exponencial** (10s, 20s, 40s... até 5 min). Esse é o `CrashLoopBackOff`: não é um erro em si, é o kubelet esperando mais tempo entre tentativas. A contagem zera depois de 10 minutos rodando sem falhar."
+        }
+      ]
+    },
+    {
+      "id": "termino",
+      "title": "Ciclo de vida e encerramento",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Encerrar um Pod bem é tão importante quanto iniciá-lo: deploys, scale-down e drain de nós matam Pods o tempo todo. Se a aplicação cai no meio de requisições, o usuário vê erros a cada deploy."
+        },
+        {
+          "type": "diagram",
+          "title": "Sequência de encerramento",
+          "cols": 12,
+          "rows": 13.8,
+          "nodes": [
+            {
+              "id": "api",
+              "label": "API marca Terminating",
+              "x": 3,
+              "y": 0,
+              "w": 6,
+              "h": 1.8,
+              "sub": "deletionTimestamp",
+              "variant": "accent"
+            },
+            {
+              "id": "ep",
+              "label": "Sai dos Endpoints",
+              "x": 0,
+              "y": 3.8,
+              "w": 5.2,
+              "h": 2,
+              "sub": "sem novo tráfego"
+            },
+            {
+              "id": "pre",
+              "label": "preStop hook",
+              "x": 6.8,
+              "y": 3.8,
+              "w": 5.2,
+              "h": 2,
+              "sub": "se existir"
+            },
+            {
+              "id": "term",
+              "label": "SIGTERM",
+              "x": 3,
+              "y": 7.8,
+              "w": 6,
+              "h": 1.8,
+              "sub": "PID 1",
+              "variant": "accent"
+            },
+            {
+              "id": "kill",
+              "label": "SIGKILL",
+              "x": 3,
+              "y": 11.6,
+              "w": 6,
+              "h": 1.8,
+              "sub": "se passar do grace",
+              "variant": "dashed"
+            }
+          ],
+          "edges": [
+            {
+              "from": "api",
+              "to": "ep",
+              "label": "paralelo"
+            },
+            {
+              "from": "api",
+              "to": "pre",
+              "label": "kubelet"
+            },
+            {
+              "from": "pre",
+              "to": "term",
+              "label": "termina",
+              "accent": true
+            },
+            {
+              "from": "term",
+              "to": "kill",
+              "label": "grace expira",
+              "dashed": true
+            }
+          ],
+          "groups": [],
+          "caption": "A remoção dos Endpoints e o `preStop` acontecem **em paralelo**. Por isso há uma corrida: o tráfego pode ainda chegar por alguns segundos depois do SIGTERM."
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Marcação",
+              "text": "A API define `deletionTimestamp`; o Pod passa a `Terminating`. O relógio de `terminationGracePeriodSeconds` (padrão 30s) começa aqui."
+            },
+            {
+              "title": "Saída do balanceamento",
+              "text": "O controlador de EndpointSlices tira o Pod dos Services. Proxies e Ingress demoram a perceber, daí a corrida."
+            },
+            {
+              "title": "preStop",
+              "text": "O kubelet executa o hook, se definido. O tempo dele **conta** dentro do grace period."
+            },
+            {
+              "title": "SIGTERM",
+              "text": "Enviado ao PID 1 de cada container. A app deve parar de aceitar conexões novas, terminar as em andamento e sair."
+            },
+            {
+              "title": "SIGKILL",
+              "text": "Se o grace period acabar, o kubelet mata o que sobrou. Exit code 137."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  terminationGracePeriodSeconds: 45\n  containers:\n    - name: app\n      image: ghcr.io/acme/web:1.4.2\n      lifecycle:\n        preStop:\n          sleep:\n            seconds: 10   # deixa o roteamento convergir",
+          "file": "grace.yaml"
+        },
+        {
+          "type": "p",
+          "text": "O `preStop` com `sleep` nativo (GA no 1.34) dispensa embutir um binário `sleep` na imagem, o que é útil em imagens distroless. Esses 10 segundos dão tempo para Endpoints, kube-proxy e Ingress pararem de enviar tráfego antes de a app receber SIGTERM."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Se o seu entrypoint for um script `sh -c`, o SIGTERM vai para o shell, que **não repassa** o sinal ao processo filho. A app só morre no SIGKILL, 30s depois. Use `exec minha-app` no script, ou rode o binário diretamente como entrypoint.",
+          "title": "PID 1 e sinais"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# observe o encerramento de um Pod\nkubectl delete pod web-0 --wait=false\nkubectl get pod web-0 -w\nkubectl describe pod web-0 | grep -A3 \"Last State\""
+        }
+      ]
+    },
+    {
+      "id": "deployment",
+      "title": "Deployment, ReplicaSet e rolling update",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um **ReplicaSet** garante que existam N Pods que casam com um seletor de labels. Ele não sabe atualizar: se você muda a imagem no ReplicaSet, nada acontece com os Pods existentes."
+        },
+        {
+          "type": "p",
+          "text": "O **Deployment** resolve isso gerenciando ReplicaSets. Cada vez que o `spec.template` muda (e só quando ele muda), o Deployment cria um **novo ReplicaSet**, identificado por um hash do template, e move réplicas do antigo para o novo de forma controlada. Alterar só `replicas` não cria revisão."
+        },
+        {
+          "type": "diagram",
+          "title": "Cadeia de propriedade",
+          "cols": 12,
+          "rows": 12.0,
+          "nodes": [
+            {
+              "id": "dep",
+              "label": "Deployment web",
+              "x": 3.5,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "template v2",
+              "variant": "accent"
+            },
+            {
+              "id": "rs1",
+              "label": "ReplicaSet 7d4b",
+              "x": 0,
+              "y": 4.8,
+              "w": 5,
+              "h": 2,
+              "sub": "v1 · 0 réplicas",
+              "variant": "muted"
+            },
+            {
+              "id": "rs2",
+              "label": "ReplicaSet 9f2c",
+              "x": 7,
+              "y": 4.8,
+              "w": 5,
+              "h": 2,
+              "sub": "v2 · 3 réplicas",
+              "variant": "accent"
+            },
+            {
+              "id": "old",
+              "label": "Nenhum Pod",
+              "x": 0,
+              "y": 9.6,
+              "w": 5,
+              "h": 2,
+              "sub": "guardado p/ rollback",
+              "variant": "dashed"
+            },
+            {
+              "id": "pods",
+              "label": "3 Pods",
+              "x": 7,
+              "y": 9.6,
+              "w": 5,
+              "h": 2,
+              "sub": "web-9f2c-xxxxx"
+            }
+          ],
+          "edges": [
+            {
+              "from": "dep",
+              "to": "rs1",
+              "label": "ownerRef",
+              "dashed": true
+            },
+            {
+              "from": "dep",
+              "to": "rs2",
+              "label": "ownerRef",
+              "accent": true
+            },
+            {
+              "from": "rs1",
+              "to": "old",
+              "dashed": true
+            },
+            {
+              "from": "rs2",
+              "to": "pods",
+              "label": "cria",
+              "accent": true
+            }
+          ],
+          "groups": [],
+          "caption": "Cada objeto aponta para o dono em `metadata.ownerReferences`. Apagar o Deployment apaga em cascata os ReplicaSets e os Pods."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 4\n  revisionHistoryLimit: 10\n  progressDeadlineSeconds: 600\n  minReadySeconds: 5\n  selector:\n    matchLabels: { app: web }\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 25%\n      maxUnavailable: 0\n  template:\n    metadata:\n      labels: { app: web }\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/acme/web:1.4.2",
+          "file": "deployment.yaml"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`selector` é **imutável** depois de criado e precisa casar com `template.metadata.labels`.",
+            "`revisionHistoryLimit` define quantos ReplicaSets antigos (com 0 réplicas) são guardados para `rollout undo`.",
+            "`progressDeadlineSeconds` marca o rollout como `ProgressDeadlineExceeded` se não avançar; o Deployment **não** faz rollback sozinho.",
+            "`minReadySeconds` exige que o Pod fique pronto por N segundos antes de contar como disponível."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Histórico e rollback"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kubectl rollout status deploy/web\nkubectl rollout history deploy/web\nkubectl rollout history deploy/web --revision=3\nkubectl rollout undo deploy/web\nkubectl rollout undo deploy/web --to-revision=2\nkubectl rollout pause deploy/web     # agrupa várias mudanças\nkubectl rollout resume deploy/web\nkubectl rollout restart deploy/web   # novo template via annotation"
+        },
+        {
+          "type": "p",
+          "text": "Para documentar a causa de uma revisão, anote o Deployment com `kubernetes.io/change-cause`. A flag `--record` está **deprecada** e não deve ser usada. Em GitOps, o `git revert` é o rollback de verdade; `rollout undo` é uma medida de emergência que cria drift."
+        },
+        {
+          "type": "h",
+          "text": "Rolling update na prática"
+        },
+        {
+          "type": "p",
+          "text": "A estratégia padrão, `RollingUpdate`, troca Pods gradualmente. Dois parâmetros definem a margem de manobra, ambos aceitando número absoluto ou porcentagem:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Parâmetro",
+            "Significa",
+            "Padrão",
+            "Arredondamento"
+          ],
+          "rows": [
+            [
+              "`maxSurge`",
+              "Quantos Pods **acima** de `replicas` podem existir durante a troca",
+              "25%",
+              "Para cima"
+            ],
+            [
+              "`maxUnavailable`",
+              "Quantos Pods **abaixo** de `replicas` podem estar indisponíveis",
+              "25%",
+              "Para baixo"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O Deployment controller escala o ReplicaSet novo até o limite de surge e o antigo até o limite de indisponibilidade, e repete **conforme os Pods novos ficam Ready**. Por isso a readiness probe é o que torna um rollout seguro: sem ela, o Pod conta como pronto assim que o container inicia."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Se `maxSurge` e `maxUnavailable` forem ambos 0, o rollout não consegue progredir; a API rejeita essa combinação.",
+          "title": "Restrição"
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Rollout com 4 réplicas, maxSurge 1 e maxUnavailable 0",
+          "xLabel": "tempo (s)",
+          "yLabel": "PODS PRONTOS",
+          "yMax": 5,
+          "series": [
+            {
+              "name": "ReplicaSet antigo",
+              "tone": "muted",
+              "points": [
+                [
+                  0,
+                  4
+                ],
+                [
+                  10,
+                  4
+                ],
+                [
+                  10,
+                  3
+                ],
+                [
+                  20,
+                  3
+                ],
+                [
+                  20,
+                  2
+                ],
+                [
+                  30,
+                  2
+                ],
+                [
+                  30,
+                  1
+                ],
+                [
+                  40,
+                  1
+                ],
+                [
+                  40,
+                  0
+                ],
+                [
+                  50,
+                  0
+                ]
+              ]
+            },
+            {
+              "name": "ReplicaSet novo",
+              "tone": "accent",
+              "points": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  10,
+                  0
+                ],
+                [
+                  10,
+                  1
+                ],
+                [
+                  20,
+                  1
+                ],
+                [
+                  20,
+                  2
+                ],
+                [
+                  30,
+                  2
+                ],
+                [
+                  30,
+                  3
+                ],
+                [
+                  40,
+                  3
+                ],
+                [
+                  40,
+                  4
+                ],
+                [
+                  50,
+                  4
+                ]
+              ]
+            }
+          ],
+          "caption": "Ilustrativo: cada Pod novo leva ~10 s para ficar Ready. Entre os degraus existe um Pod extra em inicialização (o surge), então o total de Pods chega a 5, mas os **prontos** nunca ficam abaixo de 4."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Configuração",
+            "Efeito",
+            "Quando usar"
+          ],
+          "rows": [
+            [
+              "`maxSurge: 25%`, `maxUnavailable: 25%`",
+              "Rápido; pode reduzir a capacidade temporariamente",
+              "Padrão, serviços com folga"
+            ],
+            [
+              "`maxSurge: 1`, `maxUnavailable: 0`",
+              "Capacidade nunca cai; precisa de recursos extras no cluster",
+              "Serviços sensíveis a latência"
+            ],
+            [
+              "`maxSurge: 0`, `maxUnavailable: 1`",
+              "Sem uso extra de recursos; mais lento",
+              "Cluster apertado, GPUs"
+            ],
+            [
+              "`type: Recreate`",
+              "Mata **todos** os Pods antigos e só então cria os novos",
+              "Apps que não toleram duas versões ao mesmo tempo"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Durante um rolling update, versões v1 e v2 coexistem. Migrações de banco e contratos de API precisam ser compatíveis com as duas (padrão expand/contract). Se isso for impossível, `Recreate` aceita o downtime em troca de simplicidade.",
+          "title": "Duas versões ao mesmo tempo"
+        }
+      ]
+    },
+    {
+      "id": "controllers",
+      "title": "StatefulSet, DaemonSet, Job e CronJob",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "StatefulSet"
+        },
+        {
+          "type": "p",
+          "text": "Para cargas que precisam de **identidade estável**: bancos, filas, quóruns. Cada réplica tem um nome ordinal fixo (`db-0`, `db-1`...), um DNS estável e seu **próprio** volume que sobrevive à recriação do Pod."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Nome estável**: `db-0` volta como `db-0`, nunca com sufixo aleatório.",
+            "**DNS por Pod**: via um Service headless (`clusterIP: None`) em `serviceName`, como `db-0.db.prod.svc.cluster.local`.",
+            "**Ordem**: cria de 0 a N-1 esperando cada um ficar Ready e remove na ordem inversa (`podManagementPolicy: OrderedReady`; use `Parallel` para ignorar a ordem).",
+            "**Armazenamento**: `volumeClaimTemplates` gera um PVC por réplica (`data-db-0`). Os PVCs **não são apagados** ao reduzir réplicas, a menos que `persistentVolumeClaimRetentionPolicy` diga o contrário (GA no 1.32).",
+            "**Atualização**: `RollingUpdate` vai do maior ordinal para o menor; `partition` permite canários (só ordinais >= partition são atualizados)."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: db\nspec:\n  serviceName: db          # Service headless\n  replicas: 3\n  selector:\n    matchLabels: { app: db }\n  updateStrategy:\n    type: RollingUpdate\n    rollingUpdate: { partition: 2 }   # canário: só db-2\n  template:\n    metadata:\n      labels: { app: db }\n    spec:\n      containers:\n        - name: pg\n          image: postgres:17\n          volumeMounts:\n            - { name: data, mountPath: /var/lib/postgresql/data }\n  volumeClaimTemplates:\n    - metadata: { name: data }\n      spec:\n        accessModes: [\"ReadWriteOnce\"]\n        resources: { requests: { storage: 20Gi } }",
+          "file": "statefulset.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "StatefulSet dá identidade e storage estáveis, mas **não dá replicação nem failover**. Quem configura a replicação do banco é você (ou um operator). Em produção, prefira um operator maduro (CloudNativePG, Strimzi etc.) a montar isso à mão.",
+          "title": "Atenção"
+        },
+        {
+          "type": "h",
+          "text": "DaemonSet"
+        },
+        {
+          "type": "p",
+          "text": "Garante **um Pod por nó** (ou por subconjunto, via `nodeSelector`/affinity). Novos nós recebem o Pod automaticamente. É o padrão para agentes de log, métricas, CNI e CSI. Ele tolera por padrão taints como `not-ready` e `unreachable`; para rodar em nós com taints próprios, adicione `tolerations`."
+        },
+        {
+          "type": "h",
+          "text": "Job"
+        },
+        {
+          "type": "p",
+          "text": "Roda Pods **até completarem com sucesso**. Parâmetros que importam:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Campo",
+            "Função"
+          ],
+          "rows": [
+            [
+              "`completions`",
+              "Quantos Pods precisam terminar com sucesso"
+            ],
+            [
+              "`parallelism`",
+              "Quantos rodam ao mesmo tempo"
+            ],
+            [
+              "`backoffLimit`",
+              "Tentativas antes de marcar como `Failed` (padrão 6, com backoff exponencial)"
+            ],
+            [
+              "`activeDeadlineSeconds`",
+              "Tempo máximo total do Job"
+            ],
+            [
+              "`ttlSecondsAfterFinished`",
+              "Apaga o Job e seus Pods depois de concluído"
+            ],
+            [
+              "`completionMode: Indexed`",
+              "Cada Pod recebe um índice (`JOB_COMPLETION_INDEX`), útil para particionar trabalho"
+            ],
+            [
+              "`podFailurePolicy`",
+              "Regras por exit code ou condição: ignorar falhas por preempção, abortar em erro fatal (GA no 1.31)"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "CronJob"
+        },
+        {
+          "type": "p",
+          "text": "Cria Jobs conforme uma agenda cron. Sempre defina `timeZone` (GA no 1.27); sem ele vale o fuso do kube-controller-manager."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: relatorio\nspec:\n  schedule: \"0 3 * * *\"\n  timeZone: America/Sao_Paulo\n  concurrencyPolicy: Forbid\n  startingDeadlineSeconds: 600\n  successfulJobsHistoryLimit: 3\n  failedJobsHistoryLimit: 1\n  jobTemplate:\n    spec:\n      backoffLimit: 2\n      ttlSecondsAfterFinished: 86400\n      template:\n        spec:\n          restartPolicy: OnFailure\n          containers:\n            - name: job\n              image: ghcr.io/acme/relatorio:2.1",
+          "file": "cronjob.yaml"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "`concurrencyPolicy`",
+            "Se o Job anterior ainda roda..."
+          ],
+          "rows": [
+            [
+              "`Allow` (padrão)",
+              "Cria outro em paralelo"
+            ],
+            [
+              "`Forbid`",
+              "Pula a execução nova"
+            ],
+            [
+              "`Replace`",
+              "Cancela o antigo e inicia o novo"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Jobs precisam ser **idempotentes**: um CronJob pode, raramente, disparar duas vezes ou zero. Pense em `at-least-once`, não em `exactly-once`.",
+          "title": "Idempotência"
+        },
+        {
+          "type": "h",
+          "text": "Qual controlador usar?"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Controlador",
+            "Pods",
+            "Identidade",
+            "Termina?",
+            "Caso típico"
+          ],
+          "rows": [
+            [
+              "Deployment",
+              "N intercambiáveis",
+              "Nome aleatório",
+              "Não",
+              "APIs, front-ends, workers stateless"
+            ],
+            [
+              "StatefulSet",
+              "N ordenados",
+              "Nome e PVC estáveis",
+              "Não",
+              "Bancos, brokers, quóruns"
+            ],
+            [
+              "DaemonSet",
+              "1 por nó",
+              "Ligada ao nó",
+              "Não",
+              "Agentes de log, CNI, CSI"
+            ],
+            [
+              "Job",
+              "Até completar",
+              "Opcional (Indexed)",
+              "Sim",
+              "Migrações, batch, ETL"
+            ],
+            [
+              "CronJob",
+              "Um Job por horário",
+              "Por execução",
+              "Sim",
+              "Backups, relatórios"
+            ],
+            [
+              "ReplicaSet",
+              "N intercambiáveis",
+              "Nome aleatório",
+              "Não",
+              "Detalhe interno do Deployment"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "A pergunta decisiva é: **a réplica 2 é distinguível da réplica 3?** Se sim, StatefulSet. Se o trabalho é por nó, DaemonSet. Se tem fim, Job. Todo o resto é Deployment."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Pods \"soltos\" (sem controlador) não são recriados se o nó falhar. Use-os só para depuração, com `kubectl run` ou `kubectl debug`.",
+          "title": "Pod avulso"
+        }
+      ]
+    },
+    {
+      "id": "probes",
+      "title": "Probes: startup, liveness e readiness",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O kubelet executa probes para decidir o que fazer com cada container. As três têm **consequências diferentes**, e confundi-las é uma das maiores fontes de incidentes."
+        },
+        {
+          "type": "diagram",
+          "title": "Fluxo das probes",
+          "cols": 12,
+          "rows": 10.8,
+          "nodes": [
+            {
+              "id": "start",
+              "label": "Container inicia",
+              "x": 3.5,
+              "y": 0,
+              "w": 5,
+              "h": 1.8,
+              "sub": "processo em execução"
+            },
+            {
+              "id": "su",
+              "label": "startupProbe",
+              "x": 3.5,
+              "y": 3.8,
+              "w": 5,
+              "h": 2,
+              "sub": "bloqueia as outras",
+              "variant": "accent"
+            },
+            {
+              "id": "lv",
+              "label": "livenessProbe",
+              "x": 0,
+              "y": 8,
+              "w": 5.4,
+              "h": 2.4,
+              "sub": "falha = restart"
+            },
+            {
+              "id": "rd",
+              "label": "readinessProbe",
+              "x": 6.6,
+              "y": 8,
+              "w": 5.4,
+              "h": 2.4,
+              "sub": "falha: sem tráfego"
+            }
+          ],
+          "edges": [
+            {
+              "from": "start",
+              "to": "su",
+              "label": "inicia"
+            },
+            {
+              "from": "su",
+              "to": "lv",
+              "label": "sucesso"
+            },
+            {
+              "from": "su",
+              "to": "rd",
+              "label": "sucesso"
+            }
+          ],
+          "groups": [],
+          "caption": "Se a startupProbe estourar `failureThreshold`, o container é reiniciado. Enquanto ela não passa, liveness e readiness nem rodam."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Probe",
+            "Pergunta",
+            "Se falhar",
+            "Se ausente"
+          ],
+          "rows": [
+            [
+              "`startupProbe`",
+              "Já terminou de iniciar?",
+              "Reinicia o container",
+              "Liveness/readiness rodam desde o início"
+            ],
+            [
+              "`livenessProbe`",
+              "Travou sem conserto?",
+              "Reinicia o container",
+              "Considera sempre vivo"
+            ],
+            [
+              "`readinessProbe`",
+              "Pode receber tráfego agora?",
+              "Remove dos Endpoints (sem restart)",
+              "Pronto assim que o container sobe"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Mecanismos e parâmetros"
+        },
+        {
+          "type": "p",
+          "text": "Cada probe pode ser `httpGet` (2xx/3xx = sucesso), `tcpSocket`, `exec` (exit 0) ou `grpc` (protocolo gRPC Health Checking, GA no 1.27)."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Campo",
+            "Padrão",
+            "Efeito"
+          ],
+          "rows": [
+            [
+              "`initialDelaySeconds`",
+              "0",
+              "Espera antes da primeira checagem"
+            ],
+            [
+              "`periodSeconds`",
+              "10",
+              "Intervalo entre checagens"
+            ],
+            [
+              "`timeoutSeconds`",
+              "1",
+              "Tempo máximo de uma checagem"
+            ],
+            [
+              "`failureThreshold`",
+              "3",
+              "Falhas consecutivas para agir"
+            ],
+            [
+              "`successThreshold`",
+              "1",
+              "Sucessos para voltar a OK (só readiness aceita > 1)"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "containers:\n  - name: app\n    image: ghcr.io/acme/web:1.4.2\n    ports: [{ name: http, containerPort: 8080 }]\n    startupProbe:\n      httpGet: { path: /healthz, port: http }\n      periodSeconds: 5\n      failureThreshold: 36     # até 180 s para iniciar\n    livenessProbe:\n      httpGet: { path: /healthz, port: http }\n      periodSeconds: 10\n      timeoutSeconds: 2\n    readinessProbe:\n      httpGet: { path: /ready, port: http }\n      periodSeconds: 5\n      failureThreshold: 2",
+          "file": "probes.yaml"
+        },
+        {
+          "type": "p",
+          "text": "O tempo máximo que a app tem para iniciar é `failureThreshold × periodSeconds` da startupProbe. Isso permite uma liveness agressiva em regime normal sem matar apps lentas na partida."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Nunca coloque dependências externas (banco, cache, outro serviço) na **liveness**. Se o banco cair, todos os Pods falham juntos, reiniciam em loop e transformam uma falha parcial em indisponibilidade total. Dependências cabem, com cuidado, na readiness.",
+          "title": "Erro clássico"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Liveness e readiness apontando para o mesmo endpoint pesado: sob carga ele passa a estourar `timeoutSeconds` e o Pod é reiniciado justamente quando mais precisa.",
+            "`initialDelaySeconds` fixo e alto em vez de startupProbe: atrasa todo deploy e ainda quebra quando a app fica mais lenta.",
+            "Sem readiness probe: o rolling update acha que o Pod está pronto antes da hora e derruba os antigos cedo demais.",
+            "Probe `exec` que sobe um processo pesado a cada 5 s: consome CPU do nó em escala."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "recursos",
+      "title": "Recursos, QoS e limites",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Cada container declara dois números por recurso, e eles significam coisas **completamente diferentes**:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "",
+            "`requests`",
+            "`limits`"
+          ],
+          "rows": [
+            [
+              "Quem usa",
+              "Scheduler (e o kubelet para pesos)",
+              "Kernel via cgroups"
+            ],
+            [
+              "Significado",
+              "Quanto o Pod **reserva** no nó",
+              "Quanto ele pode **consumir** no máximo"
+            ],
+            [
+              "CPU",
+              "Peso relativo (`cpu.weight`) em contenção",
+              "Quota CFS: tempo de CPU por período de 100 ms"
+            ],
+            [
+              "Memória",
+              "Reserva no agendamento",
+              "Teto rígido: acima dele, **OOMKill**"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "resources:\n  requests: { cpu: 250m, memory: 256Mi }\n  limits:   { memory: 512Mi }     # sem limit de CPU"
+        },
+        {
+          "type": "h",
+          "text": "CPU: throttling, não morte"
+        },
+        {
+          "type": "p",
+          "text": "CPU é compressível. Com `limits.cpu: 500m`, o container ganha 50 ms de CPU a cada período de 100 ms, **somando todas as threads**. Uma app com 8 threads gasta a cota em ~6 ms e fica parada até o próximo período, mesmo com o nó ocioso. O resultado é latência de cauda alta (p99), sem erro nenhum nos logs."
+        },
+        {
+          "type": "h",
+          "text": "Memória: OOMKill"
+        },
+        {
+          "type": "p",
+          "text": "Memória não é compressível. Ao ultrapassar o limit, o kernel mata o processo (OOM killer) e o Pod mostra `OOMKilled` com exit code 137. Não confunda com SIGKILL por falha de liveness: o `kubectl describe` diferencia a razão."
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "O que acontece ao ultrapassar o limite",
+          "unit": "",
+          "bars": [
+            {
+              "label": "CPU acima do limit",
+              "value": 1,
+              "display": "throttling (lento)"
+            },
+            {
+              "label": "Memória acima do limit",
+              "value": 3,
+              "display": "OOMKill (reinício)"
+            },
+            {
+              "label": "Memória do nó esgotada",
+              "value": 4,
+              "display": "eviction de Pods"
+            }
+          ],
+          "caption": "Ilustrativo e qualitativo: a altura representa a severidade, não uma medida."
+        },
+        {
+          "type": "h",
+          "text": "Classes de QoS"
+        },
+        {
+          "type": "p",
+          "text": "O Kubernetes calcula a classe de QoS de cada Pod a partir das requests e limits. Ela determina **quem morre primeiro** quando o nó fica sem memória."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Classe",
+            "Condição",
+            "Ordem de despejo"
+          ],
+          "rows": [
+            [
+              "`Guaranteed`",
+              "Todo container tem requests = limits para CPU **e** memória",
+              "Por último"
+            ],
+            [
+              "`Burstable`",
+              "Pelo menos uma request ou limit, mas não Guaranteed",
+              "No meio (priorizando quem excede a request)"
+            ],
+            [
+              "`BestEffort`",
+              "Nenhuma request nem limit",
+              "Primeiro"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O kubelet faz **node-pressure eviction** quando `memory.available` ou o disco cruzam os limiares (por padrão, hard em `memory.available<100Mi`). Ele escolhe Pods que excedem as requests, de menor prioridade, antes dos demais. Já o OOM killer do kernel usa o `oom_score_adj`, derivado do QoS."
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Receita comum e sólida: **sempre** `requests` de CPU e memória realistas, `limits.memory` igual à request (previsível) e **sem** `limits.cpu`, ou com um valor bem folgado. Pods Guaranteed ainda são úteis para cargas críticas.",
+          "title": "Receita"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "O resize in-place de recursos de Pods em execução (subrecurso `resize`) chegou a GA no 1.35, permitindo ajustar CPU e memória sem recriar o Pod.",
+          "title": "Novo"
+        },
+        {
+          "type": "h",
+          "text": "LimitRange e ResourceQuota"
+        },
+        {
+          "type": "p",
+          "text": "Dois objetos por namespace para governança: o **LimitRange** define `defaultRequest`, `default` (limit), `min` e `max` por container, aplicados na admissão; o **ResourceQuota** limita o **total** do namespace."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: ResourceQuota\nmetadata: { name: time-pagamentos, namespace: pagamentos }\nspec:\n  hard:\n    requests.cpu: \"20\"\n    requests.memory: 40Gi\n    limits.memory: 60Gi\n    pods: \"100\"\n---\napiVersion: v1\nkind: LimitRange\nmetadata: { name: padroes, namespace: pagamentos }\nspec:\n  limits:\n    - type: Container\n      defaultRequest: { cpu: 100m, memory: 128Mi }\n      default: { memory: 256Mi }",
+          "file": "quota.yaml"
+        },
+        {
+          "type": "p",
+          "text": "Quando existe quota de CPU/memória no namespace, todo Pod precisa declarar esses recursos, ou será rejeitado. O LimitRange evita isso preenchendo os padrões."
+        }
+      ]
+    },
+    {
+      "id": "config",
+      "title": "ConfigMap e Secret",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Separam configuração da imagem: a mesma imagem roda em dev e prod, mudando apenas os objetos injetados. Ambos têm limite de 1 MiB."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "",
+            "ConfigMap",
+            "Secret"
+          ],
+          "rows": [
+            [
+              "Conteúdo",
+              "Texto ou binário não sensível",
+              "Dados sensíveis (valores em base64)"
+            ],
+            [
+              "No nó",
+              "Arquivo em disco",
+              "Em `tmpfs`, nunca em disco do nó"
+            ],
+            [
+              "Acesso",
+              "RBAC comum",
+              "RBAC dedicado; recomendável restringir `get`/`list`"
+            ],
+            [
+              "Cifra em repouso",
+              "Não",
+              "Opcional no etcd (`EncryptionConfiguration`, KMS v2)"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: ConfigMap\nmetadata: { name: web-config }\ndata:\n  LOG_LEVEL: info\n  app.toml: |\n    port = 8080\n    timeout = \"5s\"\n---\napiVersion: v1\nkind: Secret\nmetadata: { name: web-secret }\ntype: Opaque\nstringData:                # a API converte para base64\n  DB_PASSWORD: troque-me",
+          "file": "config.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "base64 **não é criptografia**. Qualquer pessoa com `get secret` lê o valor com `base64 -d`. Em repositórios Git, use Sealed Secrets, SOPS ou External Secrets (veja o tópico GitOps), e habilite cifra em repouso no etcd.",
+          "title": "base64 ≠ segurança"
+        },
+        {
+          "type": "h",
+          "text": "Env vs. volume"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "containers:\n  - name: app\n    envFrom:\n      - configMapRef: { name: web-config }\n    env:\n      - name: DB_PASSWORD\n        valueFrom:\n          secretKeyRef: { name: web-secret, key: DB_PASSWORD }\n    volumeMounts:\n      - { name: cfg, mountPath: /etc/app, readOnly: true }\nvolumes:\n  - name: cfg\n    configMap:\n      name: web-config\n      items: [{ key: app.toml, path: app.toml }]"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Variável de ambiente",
+            "Volume"
+          ],
+          "rows": [
+            [
+              "Atualização",
+              "**Nunca**: fixada na criação do container",
+              "Eventual: o kubelet sincroniza, em geral em até ~1 min"
+            ],
+            [
+              "`subPath`",
+              "Não se aplica",
+              "**Não** recebe atualizações"
+            ],
+            [
+              "Segurança",
+              "Aparece em `/proc`, dumps e logs de crash",
+              "Arquivo com permissões (`defaultMode`)"
+            ],
+            [
+              "Aplicação",
+              "Lê uma vez ao iniciar",
+              "Precisa reler ou observar o arquivo"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O volume é atualizado por troca atômica de um symlink (`..data`), então a app nunca vê um arquivo pela metade. Mas a app ainda precisa recarregar. Para forçar um rollout quando a configuração muda, o padrão é colocar um hash do conteúdo numa annotation do template (Helm e Kustomize fazem isso)."
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Marque configs estáveis com `immutable: true`. O kubelet para de observá-las (menos carga no API server em clusters grandes) e ninguém altera por acidente. Para mudar, crie uma nova com outro nome (`web-config-v2`) e atualize o Deployment, o que gera um rollout e um rollback limpos.",
+          "title": "immutable"
+        }
+      ]
+    },
+    {
+      "id": "scheduling",
+      "title": "Agendamento e disrupções",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O scheduler filtra nós que cabem (requests, taints, afinidades) e depois pontua os restantes. Você influencia isso de dentro do Pod, com regras cada vez mais expressivas:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Mecanismo",
+            "Direção",
+            "Uso"
+          ],
+          "rows": [
+            [
+              "`nodeSelector`",
+              "Pod escolhe nós por label",
+              "Simples: `disktype: ssd`"
+            ],
+            [
+              "`nodeAffinity`",
+              "Pod escolhe nós (`required` ou `preferred`)",
+              "Zonas, tipos de instância, expressões"
+            ],
+            [
+              "`podAffinity` / `podAntiAffinity`",
+              "Pod escolhe por **outros Pods**",
+              "Colocar junto ou espalhar réplicas"
+            ],
+            [
+              "`taints` + `tolerations`",
+              "**Nó repele** Pods",
+              "Nós dedicados (GPU, sistema)"
+            ],
+            [
+              "`topologySpreadConstraints`",
+              "Distribuição uniforme entre domínios",
+              "Alta disponibilidade por zona/nó"
+            ],
+            [
+              "`priorityClassName`",
+              "Importância relativa",
+              "Preempção de Pods menos importantes"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Taints e tolerations"
+        },
+        {
+          "type": "p",
+          "text": "Um taint no nó tem um efeito: `NoSchedule` (não agenda), `PreferNoSchedule` (evita) ou `NoExecute` (também **expulsa** Pods existentes sem toleration; `tolerationSeconds` dá um prazo). A toleration só **permite** o agendamento; para atrair o Pod ao nó, combine com nodeAffinity."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kubectl taint nodes gpu-1 gpu=true:NoSchedule\nkubectl taint nodes gpu-1 gpu=true:NoSchedule-   # remove"
+        },
+        {
+          "type": "h",
+          "text": "Espalhar réplicas"
+        },
+        {
+          "type": "p",
+          "text": "Anti-affinity funciona, mas `topologySpreadConstraints` costuma ser melhor: controla o **desequilíbrio máximo** (`maxSkew`) entre domínios em vez de proibir coabitação, e escala bem para dezenas de réplicas."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  topologySpreadConstraints:\n    - maxSkew: 1\n      topologyKey: topology.kubernetes.io/zone\n      whenUnsatisfiable: DoNotSchedule\n      labelSelector:\n        matchLabels: { app: web }\n    - maxSkew: 1\n      topologyKey: kubernetes.io/hostname\n      whenUnsatisfiable: ScheduleAnyway\n      labelSelector:\n        matchLabels: { app: web }",
+          "file": "spread.yaml"
+        },
+        {
+          "type": "p",
+          "text": "Aqui: nunca mais que 1 Pod de diferença entre zonas (regra rígida) e, em melhor esforço, também entre nós."
+        },
+        {
+          "type": "h",
+          "text": "Prioridade e preempção"
+        },
+        {
+          "type": "p",
+          "text": "Uma `PriorityClass` dá um valor numérico ao Pod. Se um Pod de alta prioridade não cabe, o scheduler pode **expulsar** Pods de menor prioridade (preempção). Use `preemptionPolicy: Never` para uma prioridade que só ordena a fila sem expulsar ninguém. Classes `system-cluster-critical` e `system-node-critical` são reservadas aos componentes do sistema."
+        },
+        {
+          "type": "h",
+          "text": "PodDisruptionBudget"
+        },
+        {
+          "type": "p",
+          "text": "O PDB limita quantos Pods de um conjunto podem estar indisponíveis durante **disrupções voluntárias**: `kubectl drain`, upgrades de nós, consolidação do Karpenter, qualquer uso da Eviction API. Ele **não** protege contra falhas involuntárias (nó que morre, OOM)."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata: { name: web }\nspec:\n  maxUnavailable: 1\n  selector:\n    matchLabels: { app: web }\n  unhealthyPodEvictionPolicy: AlwaysAllow",
+          "file": "pdb.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "`minAvailable` igual ao número de réplicas (ou `maxUnavailable: 0`) trava todo drain de nó e todo upgrade do cluster. E com `replicas: 1` o PDB só atrapalha. `unhealthyPodEvictionPolicy: AlwaysAllow` evita que Pods já quebrados bloqueiem a manutenção.",
+          "title": "Cuidado"
+        }
+      ]
+    },
+    {
+      "id": "hpa",
+      "title": "Autoscaling: HPA, VPA, nós e eventos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O **HorizontalPodAutoscaler** (`autoscaling/v2`) ajusta `spec.replicas` de um Deployment, StatefulSet ou outro recurso com subrecurso `scale`. Ele roda no kube-controller-manager, em um loop a cada 15 segundos."
+        },
+        {
+          "type": "diagram",
+          "title": "Loop do HPA",
+          "cols": 12,
+          "rows": 8.4,
+          "nodes": [
+            {
+              "id": "hpa",
+              "label": "HPA controller",
+              "x": 7,
+              "y": 0,
+              "w": 5,
+              "h": 2.2,
+              "sub": "calcula réplicas",
+              "variant": "accent"
+            },
+            {
+              "id": "ms",
+              "label": "Metrics Server",
+              "x": 0,
+              "y": 0,
+              "w": 5,
+              "h": 2.2,
+              "sub": "metrics.k8s.io"
+            },
+            {
+              "id": "dep",
+              "label": "Deployment",
+              "x": 7,
+              "y": 5.6,
+              "w": 5,
+              "h": 2.2,
+              "sub": "spec.replicas"
+            },
+            {
+              "id": "pods",
+              "label": "Pods",
+              "x": 0,
+              "y": 5.6,
+              "w": 5,
+              "h": 2.2,
+              "sub": "uso de CPU/mem"
+            }
+          ],
+          "edges": [
+            {
+              "from": "hpa",
+              "to": "ms",
+              "label": "lê métricas"
+            },
+            {
+              "from": "hpa",
+              "to": "dep",
+              "label": "escala",
+              "accent": true
+            },
+            {
+              "from": "dep",
+              "to": "pods",
+              "label": "cria/remove"
+            },
+            {
+              "from": "pods",
+              "to": "ms",
+              "label": "kubelet reporta",
+              "dashed": true
+            }
+          ],
+          "groups": [],
+          "caption": "O Metrics Server agrega o uso dos Pods vindo dos kubelets. Métricas customizadas ou externas chegam por adaptadores (Prometheus Adapter, KEDA)."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "desiredReplicas = ceil( currentReplicas * atual / alvo )\n\n# 4 réplicas a 90% de CPU, alvo 60%:\n#   ceil(4 * 90 / 60) = ceil(6.0) = 6 réplicas\n# 6 réplicas a 30% de CPU, alvo 60%:\n#   ceil(6 * 30 / 60) = 3 réplicas"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Tolerância**: se a razão atual/alvo estiver dentro de 10% de 1,0, nada muda (evita oscilação).",
+            "**Utilization é sobre a request**: 60% de CPU significa 60% do `requests.cpu`. Sem request, o HPA de CPU não funciona.",
+            "**Pods não prontos** e recém-criados são tratados com cautela no cálculo, para não superestimar a carga durante o boot.",
+            "**Várias métricas**: o HPA calcula cada uma e usa o **maior** resultado."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata: { name: web }\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: web\n  minReplicas: 3\n  maxReplicas: 20\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target: { type: Utilization, averageUtilization: 60 }\n  behavior:\n    scaleUp:\n      stabilizationWindowSeconds: 0\n      policies:\n        - { type: Percent, value: 100, periodSeconds: 15 }\n        - { type: Pods, value: 4, periodSeconds: 15 }\n      selectPolicy: Max\n    scaleDown:\n      stabilizationWindowSeconds: 300\n      policies:\n        - { type: Percent, value: 10, periodSeconds: 60 }",
+          "file": "hpa.yaml"
+        },
+        {
+          "type": "p",
+          "text": "O bloco `behavior` controla a velocidade. Na **subida**, o padrão é agressivo (sem janela, até dobrar ou +4 Pods a cada 15 s). Na **descida**, a janela de estabilização de 300 s faz o HPA usar a **maior** recomendação dos últimos 5 minutos, evitando derrubar capacidade por um vale curto de tráfego. As `policies` limitam quanto pode mudar por período."
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "HPA reagindo a um pico de carga",
+          "xLabel": "tempo (min)",
+          "yLabel": "RÉPLICAS",
+          "yMax": 10,
+          "series": [
+            {
+              "name": "Necessárias",
+              "tone": "muted",
+              "dashed": true,
+              "points": [
+                [
+                  0,
+                  2
+                ],
+                [
+                  5,
+                  2
+                ],
+                [
+                  5,
+                  8
+                ],
+                [
+                  20,
+                  8
+                ],
+                [
+                  20,
+                  2
+                ],
+                [
+                  40,
+                  2
+                ]
+              ]
+            },
+            {
+              "name": "Réplicas do HPA",
+              "tone": "accent",
+              "points": [
+                [
+                  0,
+                  2
+                ],
+                [
+                  5,
+                  2
+                ],
+                [
+                  5.3,
+                  4
+                ],
+                [
+                  5.6,
+                  8
+                ],
+                [
+                  20,
+                  8
+                ],
+                [
+                  25,
+                  8
+                ],
+                [
+                  25.3,
+                  4
+                ],
+                [
+                  25.6,
+                  2
+                ],
+                [
+                  40,
+                  2
+                ]
+              ]
+            }
+          ],
+          "caption": "Ilustrativo, com os padrões de behavior. A subida é quase imediata; a descida só começa após a janela de 5 min. O tempo real de Pods prontos inclui agendamento, pull da imagem e probes."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Se o Deployment tem `replicas: 3` no manifesto aplicado por GitOps, cada sync **reverte** o valor que o HPA definiu. Remova o campo `spec.replicas` do manifesto quando houver HPA.",
+          "title": "HPA vs. GitOps"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "HPA e CPU: para apps que gastam CPU em picos curtos (JVM no boot), uma `requests.cpu` pequena faz a utilização passar de 100% e o HPA escala demais. Calibre requests com dados reais.",
+          "title": "Calibração"
+        },
+        {
+          "type": "h",
+          "text": "VPA, nós e escala por eventos"
+        },
+        {
+          "type": "h",
+          "text": "VPA: ajustar o tamanho"
+        },
+        {
+          "type": "p",
+          "text": "O **VerticalPodAutoscaler** é um add-on (não vem no cluster) que observa o uso histórico e recomenda `requests` por container. Modos de `updatePolicy`: `Off` (só recomenda, ótimo para começar), `Initial` (aplica só na criação do Pod), `Recreate`/`Auto` (despeja e recria o Pod com novos valores). Versões recentes do VPA também aproveitam o resize in-place para evitar a recriação."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Não use VPA e HPA no **mesmo recurso** (CPU ou memória): um aumenta a request, o outro muda a razão de utilização, e os dois brigam. Combine VPA com HPA em métrica customizada ou externa, ou use VPA em modo `Off` só como fonte de recomendação.",
+          "title": "Conflito"
+        },
+        {
+          "type": "h",
+          "text": "Cluster Autoscaler e Karpenter"
+        },
+        {
+          "type": "p",
+          "text": "Escalar Pods não adianta se não há nós. Quando o HPA cria réplicas que ficam `Pending` por falta de capacidade, é a camada de nós que reage."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "",
+            "Cluster Autoscaler",
+            "Karpenter"
+          ],
+          "rows": [
+            [
+              "Modelo",
+              "Ajusta o tamanho de grupos de nós pré-definidos (ASG, MIG, VMSS)",
+              "Cria nós sob demanda direto na API do provedor, a partir dos Pods pendentes"
+            ],
+            [
+              "Escolha da máquina",
+              "Limitada aos tipos do grupo",
+              "Escolhe o tipo mais barato que cabe (`NodePool` + classe do provedor)"
+            ],
+            [
+              "Redução",
+              "Remove nós com baixa utilização após ~10 min",
+              "Consolidação ativa: junta cargas e substitui nós por menores/mais baratos"
+            ],
+            [
+              "Respeita PDB",
+              "Sim",
+              "Sim"
+            ],
+            [
+              "Objetos",
+              "Flags e anotações",
+              "`NodePool`, `NodeClaim` (API v1, GA)"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Ambos tomam decisões com base nas **requests**, não no uso real. Requests infladas viram nós ociosos pagos; requests baixas demais causam contenção de verdade. Por isso dimensionar requests é uma prática de custo, não só de estabilidade."
+        },
+        {
+          "type": "h",
+          "text": "KEDA: escala por eventos"
+        },
+        {
+          "type": "p",
+          "text": "O **KEDA** cria e gerencia HPAs a partir de fontes de evento (tamanho de fila no Kafka, SQS, RabbitMQ; consultas Prometheus; cron). Seu diferencial é **escalar de 0 a 1** (e de volta), algo que o HPA nativo não faz por padrão. Você declara um `ScaledObject` apontando para o Deployment e o gatilho."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: keda.sh/v1alpha1\nkind: ScaledObject\nmetadata: { name: worker }\nspec:\n  scaleTargetRef: { name: worker }\n  minReplicaCount: 0\n  maxReplicaCount: 30\n  triggers:\n    - type: rabbitmq\n      metadata:\n        queueName: pedidos\n        mode: QueueLength\n        value: \"20\"          # ~20 mensagens por réplica\n        hostFromEnv: RABBIT_URL",
+          "file": "scaledobject.yaml"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Carga sobe",
+              "text": "Métrica ultrapassa o alvo; o HPA aumenta as réplicas."
+            },
+            {
+              "title": "Pods ficam Pending",
+              "text": "Não há capacidade nos nós; o scheduler registra `FailedScheduling`."
+            },
+            {
+              "title": "Nós novos",
+              "text": "Cluster Autoscaler ou Karpenter provisionam máquinas (tipicamente 1 a 3 min)."
+            },
+            {
+              "title": "Pods iniciam",
+              "text": "Pull da imagem, startupProbe e readiness antes de receber tráfego."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Sintoma",
+            "Como evitar"
+          ],
+          "rows": [
+            [
+              "Sem readiness probe",
+              "Erros 5xx durante cada deploy",
+              "Defina readiness e `maxUnavailable: 0` em serviços críticos"
+            ],
+            [
+              "Dependência externa na liveness",
+              "Reinício em cascata quando o banco cai",
+              "Liveness só testa o próprio processo"
+            ],
+            [
+              "`latest` como tag",
+              "Pods diferentes rodando versões diferentes; sem rollback",
+              "Tags imutáveis ou digest (`@sha256:...`)"
+            ],
+            [
+              "`limits.cpu` baixo",
+              "p99 alto sem erros; `container_cpu_cfs_throttled_*` crescendo",
+              "Remover ou folgar o limit de CPU"
+            ],
+            [
+              "Sem requests",
+              "Pods BestEffort despejados; HPA sem efeito",
+              "Sempre declarar requests; usar LimitRange"
+            ],
+            [
+              "SIGTERM ignorado",
+              "Cada deploy demora 30 s e termina em exit 137",
+              "`exec` no entrypoint; tratar o sinal na app"
+            ],
+            [
+              "PDB restritivo demais",
+              "`kubectl drain` fica preso",
+              "`maxUnavailable: 1` e réplicas suficientes"
+            ],
+            [
+              "`replicas` fixo com HPA",
+              "GitOps desfaz o escalonamento",
+              "Omitir `spec.replicas`"
+            ],
+            [
+              "Variável de ambiente para config dinâmica",
+              "Mudança no ConfigMap não chega à app",
+              "Volume + reload, ou rollout por hash"
+            ],
+            [
+              "CronJob sem `concurrencyPolicy`",
+              "Execuções empilhadas",
+              "`Forbid` e `activeDeadlineSeconds`"
+            ],
+            [
+              "Secret em Git em texto puro",
+              "Credencial vazada para sempre",
+              "Sealed Secrets, SOPS ou External Secrets"
+            ],
+            [
+              "StatefulSet sem backup",
+              "Apagar o PVC apaga os dados",
+              "Backups testados; revisar a retention policy"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "Pod",
+              "def": "Menor unidade agendável: containers que compartilham rede e volumes."
+            },
+            {
+              "term": "ReplicaSet",
+              "def": "Mantém N Pods que casam com um seletor; base do Deployment."
+            },
+            {
+              "term": "Rollout",
+              "def": "Processo de substituir Pods antigos pelos de um novo template."
+            },
+            {
+              "term": "maxSurge / maxUnavailable",
+              "def": "Margem de Pods extras e de Pods indisponíveis durante um rolling update."
+            },
+            {
+              "term": "Sidecar nativo",
+              "def": "Init container com `restartPolicy: Always`, que roda durante toda a vida do Pod."
+            },
+            {
+              "term": "Headless Service",
+              "def": "Service com `clusterIP: None`, que expõe DNS por Pod em vez de IP virtual."
+            },
+            {
+              "term": "Probe",
+              "def": "Checagem periódica do kubelet: startup, liveness ou readiness."
+            },
+            {
+              "term": "QoS",
+              "def": "Classe do Pod (Guaranteed, Burstable, BestEffort) que define a ordem de despejo."
+            },
+            {
+              "term": "CFS quota",
+              "def": "Mecanismo do kernel que limita o tempo de CPU por período, causando throttling."
+            },
+            {
+              "term": "OOMKill",
+              "def": "Morte do processo pelo kernel por exceder o limite de memória (exit 137)."
+            },
+            {
+              "term": "Taint / toleration",
+              "def": "Repulsão do nó e a permissão do Pod para ignorá-la."
+            },
+            {
+              "term": "Topology spread",
+              "def": "Regra que distribui Pods uniformemente entre zonas ou nós."
+            },
+            {
+              "term": "PDB",
+              "def": "PodDisruptionBudget: limita disrupções voluntárias simultâneas."
+            },
+            {
+              "term": "HPA",
+              "def": "Autoscaler horizontal: ajusta o número de réplicas por métricas."
+            },
+            {
+              "term": "VPA",
+              "def": "Autoscaler vertical: recomenda ou aplica requests e limits."
+            },
+            {
+              "term": "Karpenter",
+              "def": "Provisionador de nós sob demanda baseado em Pods pendentes."
+            },
+            {
+              "term": "KEDA",
+              "def": "Escala orientada a eventos, inclusive de e para zero réplicas."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Você já sabe descrever, configurar e escalar cargas de trabalho. Falta fazê-las **conversar** e **proteger** o cluster."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Experimente: rode um Deployment com readiness probe, rode `kubectl rollout restart` sob carga (`hey`, `k6`) e veja se aparece algum erro.",
+            "Observe o throttling com `container_cpu_cfs_throttled_periods_total` no Prometheus.",
+            "Na **parte 3**: Services, Ingress e Gateway API, DNS, NetworkPolicy, armazenamento (PV/PVC/StorageClass), RBAC, Pod Security e troubleshooting."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Um bom exercício de fechamento: crie um namespace com ResourceQuota, um Deployment com HPA e PDB, e faça um `kubectl drain` em um nó. Se tudo ficar saudável, você dominou esta parte.",
+          "title": "Exercício"
+        }
+      ]
+    }
+  ]
+}

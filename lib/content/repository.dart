@@ -34,6 +34,15 @@ class ContentRepository {
     ];
   }
 
+  /// Todas as partes da série do tópico, em ordem; vazio se não for série.
+  List<Topic> seriesOf(Topic topic) {
+    if (topic.series == null) return const [];
+    return [
+      for (final t in topics)
+        if (t.series == topic.series) t,
+    ]..sort((a, b) => (a.part ?? 0).compareTo(b.part ?? 0));
+  }
+
   Topic? neighbor(Topic topic, int delta) {
     final i = topics.indexOf(topic) + delta;
     return i >= 0 && i < topics.length ? topics[i] : null;

@@ -53,6 +53,7 @@ class _TopicPageState extends State<TopicPage> {
     final pad = MediaQuery.paddingOf(context);
     final repo = ContentScope.of(context);
     final next = repo.neighbor(t, 1);
+    final parts = repo.seriesOf(t);
 
     return ColoredBox(
       color: c.background,
@@ -67,11 +68,13 @@ class _TopicPageState extends State<TopicPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
                     children: [
                       Badge(t.category, accent: true),
-                      const SizedBox(width: 8),
                       Badge(t.level),
+                      if (parts.isNotEmpty) Badge('Parte ${t.part} de ${parts.length}'),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -83,6 +86,10 @@ class _TopicPageState extends State<TopicPage> {
                     '${t.minutes} min de leitura · atualizado ${t.updated}',
                     style: AppText.eyebrow.copyWith(color: c.textMuted),
                   ),
+                  if (parts.isNotEmpty) ...[
+                    const SizedBox(height: 28),
+                    _SeriesNav(series: t.series!, parts: parts, current: t),
+                  ],
                   const SizedBox(height: 28),
                   _Toc(sections: t.sections, onTap: _jumpTo),
                   for (final (i, s) in t.sections.indexed)
@@ -91,7 +98,7 @@ class _TopicPageState extends State<TopicPage> {
                   const Hairline(),
                   const SizedBox(height: 20),
                   if (next != null)
-                    _NextTopic(topic: next)
+                    _NextTopic(topic: next, sameSeries: t.series != null && next.series == t.series)
                   else
                     Pressable(
                       onTap: () => Navigator.of(context).pop(),
@@ -262,10 +269,91 @@ class _SectionView extends StatelessWidget {
   }
 }
 
+/// Trilha de uma série: lista as partes e destaca a atual.
+class _SeriesNav extends StatelessWidget {
+  const _SeriesNav({required this.series, required this.parts, required this.current});
+
+  final String series;
+  final List<Topic> parts;
+  final Topic current;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
+      ),
+      padding: const EdgeInsets.fromLTRB(6, 14, 6, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 10, bottom: 6),
+            child: Text(
+              'SÉRIE ${series.toUpperCase()} · ${parts.length} PARTES',
+              style: AppText.eyebrow.copyWith(color: c.textMuted),
+            ),
+          ),
+          for (final p in parts)
+            Pressable(
+              onTap: p == current
+                  ? null
+                  : () => Navigator.of(context).pushReplacement(FadeRoute<void>(builder: (_) => TopicPage(topic: p))),
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                decoration: BoxDecoration(
+                  color: p == current ? c.surface : null,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 20,
+                      height: 20,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: p == current ? c.text : null,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: p == current ? c.text : c.border),
+                      ),
+                      child: Text(
+                        '${p.part}',
+                        style: AppText.eyebrow.copyWith(
+                          color: p == current ? c.background : c.textMuted,
+                          fontSize: 10.5,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        p.title,
+                        style: AppText.small.copyWith(
+                          color: p == current ? c.text : c.textSecondary,
+                          fontSize: 14,
+                          fontWeight: p == current ? FontWeight.w500 : null,
+                        ),
+                      ),
+                    ),
+                    Text('${p.minutes} min', style: AppText.eyebrow.copyWith(color: c.textMuted, fontSize: 10.5)),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _NextTopic extends StatelessWidget {
-  const _NextTopic({required this.topic});
+  const _NextTopic({required this.topic, required this.sameSeries});
 
   final Topic topic;
+  final bool sameSeries;
 
   @override
   Widget build(BuildContext context) {
@@ -285,7 +373,7 @@ class _NextTopic extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('PRÓXIMO', style: AppText.eyebrow.copyWith(color: c.textMuted)),
+                  Text(sameSeries ? 'PRÓXIMA PARTE · ${topic.part}' : 'PRÓXIMO', style: AppText.eyebrow.copyWith(color: c.textMuted)),
                   const SizedBox(height: 6),
                   Text(topic.title, style: AppText.h3.copyWith(color: c.text)),
                 ],

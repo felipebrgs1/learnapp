@@ -1,0 +1,1642 @@
+{
+  "id": "kubernetes-3",
+  "title": "Kubernetes 3 — Rede, armazenamento e segurança",
+  "summary": "Como os Pods se comunicam, como os dados persistem e como proteger e depurar um cluster: Services, DNS, Gateway API, NetworkPolicy, PV/PVC, RBAC e Pod Security.",
+  "category": "Infraestrutura",
+  "level": "Avançado",
+  "minutes": 42,
+  "updated": "out 2026",
+  "tags": [
+    "kubernetes",
+    "k8s",
+    "rede",
+    "cni",
+    "calico",
+    "cilium",
+    "service",
+    "dns",
+    "coredns",
+    "ingress",
+    "gateway api",
+    "networkpolicy",
+    "pv",
+    "pvc",
+    "storageclass",
+    "rbac",
+    "segurança",
+    "troubleshooting"
+  ],
+  "series": "Kubernetes",
+  "part": 3,
+  "sections": [
+    {
+      "id": "modelo-de-rede",
+      "title": "O modelo de rede do Kubernetes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O Kubernetes não implementa a rede dos Pods: ele **impõe um contrato** e delega a execução a um plugin. O contrato tem poucas regras, mas todo o resto (Services, DNS, NetworkPolicy) depende delas."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Todo Pod recebe um IP próprio**, único no cluster, e todos os containers do Pod compartilham esse IP e o mesmo network namespace (por isso falam entre si por `localhost`).",
+            "**Pod fala com Pod sem NAT**, em qualquer nó: o IP que o destino enxerga como origem é o IP real do Pod de origem.",
+            "**Agentes do nó (kubelet) falam com todos os Pods do nó**, e a rede é \"plana\": não há tradução de endereço entre Pods.",
+            "Os IPs de Pods são **efêmeros**: um Pod recriado ganha outro IP. É por isso que existem Services."
+          ]
+        },
+        {
+          "type": "diagram",
+          "title": "Rede plana entre nós",
+          "cols": 12,
+          "rows": 11.6,
+          "nodes": [
+            {
+              "id": "a1",
+              "label": "Pod A1",
+              "x": 0.5,
+              "y": 1.2,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "10.244.1.5"
+            },
+            {
+              "id": "a2",
+              "label": "Pod A2",
+              "x": 7,
+              "y": 1.2,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "10.244.1.6"
+            },
+            {
+              "id": "b1",
+              "label": "Pod B1",
+              "x": 0.5,
+              "y": 8,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "10.244.2.7"
+            },
+            {
+              "id": "b2",
+              "label": "Pod B2",
+              "x": 7,
+              "y": 8,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "10.244.2.8"
+            }
+          ],
+          "edges": [
+            {
+              "from": "a1",
+              "to": "b1",
+              "label": "sem NAT · via CNI",
+              "both": true,
+              "accent": true
+            },
+            {
+              "from": "a2",
+              "to": "b2",
+              "dashed": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Nó A · podCIDR 10.244.1.0/24",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 4.2
+            },
+            {
+              "label": "Nó B · podCIDR 10.244.2.0/24",
+              "x": 0,
+              "y": 7,
+              "w": 12,
+              "h": 4.4,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "Cada nó recebe uma faixa (podCIDR) do espaço de IPs de Pods. O plugin CNI decide como o pacote chega ao outro nó: rota direta, BGP ou encapsulamento (VXLAN/Geneve)."
+        },
+        {
+          "type": "h",
+          "text": "Como um Pod ganha rede"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "kubelet pede um sandbox",
+              "text": "Ao criar o Pod, o container runtime (containerd, CRI-O) cria o network namespace e o container \"pause\" que o mantém vivo."
+            },
+            {
+              "title": "O runtime chama o plugin CNI",
+              "text": "Executa o binário CNI com `ADD`, passando o namespace e a configuração de `/etc/cni/net.d`."
+            },
+            {
+              "title": "O plugin monta a rede",
+              "text": "Cria um par **veth** (uma ponta no Pod, outra no nó), atribui um IP do podCIDR (IPAM) e instala rotas ou regras."
+            },
+            {
+              "title": "O Pod fica Ready para o tráfego",
+              "text": "O IP é publicado em `status.podIPs` e, se a readiness passar, entra nos EndpointSlices dos Services."
+            }
+          ]
+        },
+        {
+          "type": "h",
+          "text": "CNI: os plugins mais usados"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Plugin",
+            "Dataplane",
+            "NetworkPolicy",
+            "Quando escolher"
+          ],
+          "rows": [
+            [
+              "Flannel",
+              "VXLAN (ou host-gw)",
+              "Não",
+              "Clusters pequenos/labs; simplicidade total"
+            ],
+            [
+              "Calico",
+              "Rotas + BGP, IPIP/VXLAN; modo eBPF opcional",
+              "Sim (e políticas globais)",
+              "Políticas ricas, BGP com a rede física"
+            ],
+            [
+              "Cilium",
+              "eBPF (pode substituir o kube-proxy)",
+              "Sim (L3–L7, FQDN)",
+              "Observabilidade (Hubble), escala, service mesh sem sidecar"
+            ],
+            [
+              "Do provedor (VPC CNI, Azure CNI)",
+              "Pods com IPs da própria VPC",
+              "Depende",
+              "Integração nativa com a rede da nuvem"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "**eBPF** permite rodar programas verificados dentro do kernel, anexados a pontos da pilha de rede. Cilium e o modo eBPF do Calico o usam para balancear Services e aplicar políticas sem percorrer longas cadeias de iptables, e com visibilidade por fluxo.",
+          "title": "eBPF em uma frase"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "O CNI é escolhido **na criação do cluster**. Trocar de plugin depois é uma migração de risco (re-IPAM, reinício de Pods). Em clusters gerenciados, confirme antes se NetworkPolicy está habilitado."
+        }
+      ]
+    },
+    {
+      "id": "services",
+      "title": "Services: um IP estável para Pods efêmeros",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um **Service** é uma abstração com nome DNS e IP virtuais estáveis, que seleciona Pods por **labels** e distribui conexões entre os que estão prontos. O controle de quem são os backends fica nos **EndpointSlices**; a mecânica de entrega fica no kube-proxy (ou no CNI)."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Tipo",
+            "O que expõe",
+            "Uso típico"
+          ],
+          "rows": [
+            [
+              "`ClusterIP` (padrão)",
+              "IP virtual só acessível dentro do cluster",
+              "Comunicação entre serviços"
+            ],
+            [
+              "`NodePort`",
+              "Abre a mesma porta (30000–32767) em todos os nós, além do ClusterIP",
+              "Testes, ou como base de um balanceador externo"
+            ],
+            [
+              "`LoadBalancer`",
+              "Pede ao cloud-controller (ou MetalLB/Cilium) um IP externo; inclui NodePort e ClusterIP",
+              "Expor L4 na nuvem ou on-prem com MetalLB"
+            ],
+            [
+              "`ExternalName`",
+              "Só um registro **CNAME** no DNS; sem IP virtual nem proxy",
+              "Apontar um nome interno para um host externo"
+            ],
+            [
+              "Headless (`clusterIP: None`)",
+              "Sem IP virtual: o DNS devolve os IPs dos Pods",
+              "StatefulSets, bancos, clientes que balanceiam sozinhos"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Service\nmetadata:\n  name: api\n  namespace: shop\nspec:\n  selector:\n    app: api\n  ports:\n    - name: http\n      port: 80          # porta do Service\n      targetPort: http  # porta nomeada no Pod\n  # type: ClusterIP  (padrão)",
+          "file": "service-clusterip.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Service\nmetadata:\n  name: db\n  namespace: shop\nspec:\n  clusterIP: None      # headless\n  selector:\n    app: db\n  ports:\n    - port: 5432",
+          "file": "service-headless.yaml"
+        },
+        {
+          "type": "p",
+          "text": "Com um StatefulSet cujo `serviceName` é esse Service headless, cada Pod ganha um nome DNS estável: `db-0.db.shop.svc.cluster.local`, `db-1.db...`. É o que permite a um cliente falar com a réplica primária específica."
+        },
+        {
+          "type": "h",
+          "text": "EndpointSlices"
+        },
+        {
+          "type": "p",
+          "text": "O controlador de EndpointSlice observa Pods que casam com o `selector` e escreve fatias (até 100 endpoints por padrão) com IP, nó, zona e as condições `ready`, `serving` e `terminating`. kube-proxy e CoreDNS leem essas fatias, e fatiar evita que uma mudança em um Service enorme reenvie uma lista gigante a todos os nós."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ kubectl get endpointslices -n shop -l kubernetes.io/service-name=api\nNAME        ADDRESSTYPE  PORTS  ENDPOINTS\napi-x7k2p   IPv4         8080   10.244.1.5,10.244.2.7\n$ kubectl get endpointslice api-x7k2p -n shop -o yaml | less"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "A API `Endpoints` (v1) está **deprecada desde o Kubernetes 1.33**. Continua funcionando por compatibilidade, mas ferramentas novas devem ler `discovery.k8s.io/v1` EndpointSlice.",
+          "title": "Endpoints está deprecado"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Um Pod só entra nos endpoints quando a **readiness probe** passa. É esse mecanismo que dá deploys sem erro: sem readiness, o tráfego chega a um Pod que ainda está subindo."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "`externalTrafficPolicy: Local` em NodePort/LoadBalancer preserva o IP de origem do cliente e evita um salto extra, mas só envia tráfego a Pods do próprio nó. `trafficDistribution: PreferClose` pede preferência por backends na mesma zona, reduzindo latência e custo de tráfego entre zonas.",
+          "title": "Origem e localidade"
+        }
+      ]
+    },
+    {
+      "id": "caminho-do-pacote",
+      "title": "Como o IP virtual funciona",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O ClusterIP **não existe em nenhuma interface**: nenhum processo escuta nele. É só um endereço que as regras de cada nó reconhecem e reescrevem. Por isso funciona mesmo que nenhuma máquina responda ao `ping` desse IP."
+        },
+        {
+          "type": "diagram",
+          "title": "Pod → ClusterIP → Pod em outro nó",
+          "cols": 12,
+          "rows": 14.4,
+          "nodes": [
+            {
+              "id": "c",
+              "label": "Pod cliente",
+              "x": 0.5,
+              "y": 1.4,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "10.244.1.5"
+            },
+            {
+              "id": "nf",
+              "label": "DNAT",
+              "x": 7,
+              "y": 1.4,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "→ 10.244.2.7",
+              "variant": "accent"
+            },
+            {
+              "id": "cni",
+              "label": "Rede do CNI",
+              "x": 7,
+              "y": 6.4,
+              "w": 4.5,
+              "h": 2,
+              "sub": "rota · VXLAN"
+            },
+            {
+              "id": "s",
+              "label": "Pod servidor",
+              "x": 7,
+              "y": 10.8,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "10.244.2.7:8080"
+            },
+            {
+              "id": "o",
+              "label": "Pod B2",
+              "x": 0.5,
+              "y": 10.8,
+              "w": 4.5,
+              "h": 2.2,
+              "sub": "10.244.2.9",
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "c",
+              "to": "nf",
+              "label": "10.96.0.10:80"
+            },
+            {
+              "from": "nf",
+              "to": "cni",
+              "label": "pacote já traduzido",
+              "accent": true
+            },
+            {
+              "from": "cni",
+              "to": "s",
+              "label": "entrega"
+            },
+            {
+              "from": "o",
+              "to": "s",
+              "dashed": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Nó 1 · iptables/nftables ou eBPF",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 4.4
+            },
+            {
+              "label": "Nó 2",
+              "x": 0,
+              "y": 9.6,
+              "w": 12,
+              "h": 4.4,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "O DNAT acontece no nó de **origem**, antes de sair do nó. A resposta volta pelo mesmo caminho e o conntrack desfaz a tradução, então o cliente acha que falou com 10.96.0.10."
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "O cliente resolve o nome",
+              "text": "`api.shop` vira o ClusterIP 10.96.0.10 via CoreDNS."
+            },
+            {
+              "title": "O pacote sai do Pod",
+              "text": "Vai pelo veth até o namespace de rede do nó e atravessa os hooks do netfilter (PREROUTING para tráfego de Pods, OUTPUT para processos do nó)."
+            },
+            {
+              "title": "A regra do Service casa",
+              "text": "kube-proxy programou uma cadeia por Service: se o destino é `10.96.0.10:80`, salta para uma cadeia que escolhe um endpoint."
+            },
+            {
+              "title": "DNAT escolhe o backend",
+              "text": "A cadeia sorteia um endpoint ready (probabilidade 1/N) e reescreve o destino para `10.244.2.7:8080`. O **conntrack** memoriza a decisão para o resto da conexão."
+            },
+            {
+              "title": "O CNI leva o pacote ao outro nó",
+              "text": "O destino agora é um IP de Pod comum: o roteamento ou o túnel do plugin cuida do resto."
+            }
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Os modos do kube-proxy"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Modo",
+            "Como funciona",
+            "Observações"
+          ],
+          "rows": [
+            [
+              "`iptables`",
+              "Cadeias DNAT em sequência com sorteio probabilístico",
+              "Padrão histórico; busca de regra é linear no nº de Services"
+            ],
+            [
+              "`nftables`",
+              "Mesma lógica em tabelas/mapas nftables",
+              "Estável desde o 1.33; mapas dão busca eficiente e atualização incremental"
+            ],
+            [
+              "`ipvs`",
+              "Balanceador do kernel (IPVS) com tabela hash e vários algoritmos",
+              "**Deprecado a partir do 1.35**; prefira nftables"
+            ],
+            [
+              "eBPF (Cilium, Calico)",
+              "Substitui o kube-proxy; mapas eBPF no kernel",
+              "Menos cópias, DSR opcional, preserva o IP de origem"
+            ]
+          ]
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Custo de lookup de um Service",
+          "xLabel": "Services no cluster (milhares)",
+          "yLabel": "TEMPO RELATIVO",
+          "yMax": 10,
+          "series": [
+            {
+              "name": "iptables (varredura linear)",
+              "tone": "primary",
+              "points": [
+                [
+                  0,
+                  0.5
+                ],
+                [
+                  2,
+                  2
+                ],
+                [
+                  4,
+                  4
+                ],
+                [
+                  6,
+                  6
+                ],
+                [
+                  8,
+                  8
+                ],
+                [
+                  10,
+                  10
+                ]
+              ]
+            },
+            {
+              "name": "nftables / eBPF (hash)",
+              "tone": "accent",
+              "points": [
+                [
+                  0,
+                  0.5
+                ],
+                [
+                  2,
+                  0.5
+                ],
+                [
+                  4,
+                  0.5
+                ],
+                [
+                  6,
+                  0.5
+                ],
+                [
+                  8,
+                  0.5
+                ],
+                [
+                  10,
+                  0.5
+                ]
+              ]
+            }
+          ],
+          "caption": "Ilustrativo, não é uma medição: representa a diferença assintótica entre varrer uma lista de regras e consultar um mapa hash. A atualização de regras no iptables também fica mais cara com muitos Services."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Regras só afetam **conexões novas**. Conexões existentes seguem o conntrack e continuam no mesmo backend até terminarem, mesmo que o Pod saia dos endpoints. Por isso o desligamento gracioso (preStop + `terminationGracePeriodSeconds`) importa.",
+          "title": "Conexões longas"
+        }
+      ]
+    },
+    {
+      "id": "dns",
+      "title": "CoreDNS e descoberta de serviços",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O **CoreDNS** roda como Deployment em `kube-system` e é exposto pelo Service `kube-dns`. O kubelet escreve no `/etc/resolv.conf` de cada Pod o IP desse Service e uma lista de **search domains**; o plugin `kubernetes` do CoreDNS responde a partir da API."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Nome",
+            "Resolve para"
+          ],
+          "rows": [
+            [
+              "`api.shop.svc.cluster.local`",
+              "ClusterIP do Service `api` no namespace `shop` (FQDN)"
+            ],
+            [
+              "`api` ou `api.shop`",
+              "O mesmo, via search domains, a partir de um Pod em `shop`"
+            ],
+            [
+              "`db-0.db.shop.svc.cluster.local`",
+              "IP do Pod `db-0` via Service headless"
+            ],
+            [
+              "`_http._tcp.api.shop.svc.cluster.local`",
+              "Registro SRV com porta e destinos"
+            ],
+            [
+              "`10-244-1-5.shop.pod.cluster.local`",
+              "IP do Pod (forma pouco usada)"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "search shop.svc.cluster.local svc.cluster.local\n       cluster.local corp.example.com\nnameserver 10.96.0.10\noptions ndots:5",
+          "file": "/etc/resolv.conf de um Pod"
+        },
+        {
+          "type": "p",
+          "text": "A regra `ndots:5` diz: se o nome tem **menos de 5 pontos**, tente primeiro cada search domain e só depois o nome como absoluto. Isso é conveniente para nomes internos (`api` funciona), mas faz consultas a hosts externos gerarem uma tempestade de buscas inúteis."
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Consultas DNS por resolução",
+          "unit": "",
+          "bars": [
+            {
+              "label": "api.stripe.com (ndots:5)",
+              "value": 10,
+              "display": "10 consultas"
+            },
+            {
+              "label": "api.stripe.com. (com ponto final)",
+              "value": 2,
+              "display": "2 consultas"
+            },
+            {
+              "label": "api.stripe.com com ndots:1",
+              "value": 2,
+              "display": "2 consultas"
+            },
+            {
+              "label": "api (Service interno)",
+              "value": 2,
+              "display": "2 consultas"
+            }
+          ],
+          "caption": "Valores calculados para o resolv.conf acima (4 search domains, A + AAAA em cada tentativa); ilustrativos. Os 5 nomes gerados dão NXDOMAIN até o último, que é o correto."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Em serviços que chamam muitas APIs externas, `ndots:5` aumenta latência e carga no CoreDNS e, com conntrack sob pressão, pode causar timeouts esporádicos de DNS. Use FQDN com ponto final ou ajuste `ndots` no Pod.",
+          "title": "Armadilha clássica"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  dnsConfig:\n    options:\n      - name: ndots\n        value: \"2\"\n      - name: single-request-reopen",
+          "file": "trecho do Pod"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ kubectl run dns --rm -it --image=registry.k8s.io/e2e-test-images/agnhost:2.47 -- sh\n/ # nslookup api.shop.svc.cluster.local\n/ # cat /etc/resolv.conf\n$ kubectl -n kube-system logs deploy/coredns\n$ kubectl -n kube-system get cm coredns -o yaml   # Corefile",
+          "file": "depurando DNS"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Para cargas pesadas em DNS, use o **NodeLocal DNSCache**: um cache por nó (DaemonSet) que evita cruzar a rede e o conntrack para cada consulta."
+        }
+      ]
+    },
+    {
+      "id": "ingress-gateway",
+      "title": "Ingress e Gateway API",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Services de tipo `LoadBalancer` operam em L4. Para expor HTTP(S) com roteamento por host e caminho, TLS e regras de tráfego, entra uma camada L7. Historicamente era o **Ingress**; hoje o caminho recomendado é a **Gateway API**."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "O **ingress-nginx** (o controlador mantido pela comunidade Kubernetes) foi **aposentado em março de 2026**: não recebe mais correções, nem de segurança. Quem ainda o usa deve planejar a migração. O recurso `Ingress` em si continua existindo na API, mas está congelado: não ganha novas funcionalidades.",
+          "title": "Ingress NGINX aposentado"
+        },
+        {
+          "type": "p",
+          "text": "O Ingress tem um problema estrutural: o recurso é minúsculo e tudo o que importa (reescrita, timeouts, canary, TLS avançado) vira **annotation específica de cada controlador**, sem portabilidade. A Gateway API resolve isso com recursos tipados e **papéis separados**."
+        },
+        {
+          "type": "diagram",
+          "title": "Papéis na Gateway API",
+          "cols": 12,
+          "rows": 10.2,
+          "nodes": [
+            {
+              "id": "gc",
+              "label": "GatewayClass",
+              "x": 0.5,
+              "y": 0.4,
+              "w": 4.5,
+              "h": 2,
+              "sub": "provedor · infra"
+            },
+            {
+              "id": "gw",
+              "label": "Gateway",
+              "x": 7,
+              "y": 0.4,
+              "w": 4.5,
+              "h": 2,
+              "sub": "operador",
+              "variant": "accent"
+            },
+            {
+              "id": "hr",
+              "label": "HTTPRoute",
+              "x": 7,
+              "y": 4.2,
+              "w": 4.5,
+              "h": 2,
+              "sub": "dev da app · regras"
+            },
+            {
+              "id": "sv",
+              "label": "Service",
+              "x": 7,
+              "y": 8,
+              "w": 4.5,
+              "h": 2,
+              "sub": "backend"
+            },
+            {
+              "id": "pd",
+              "label": "Pods",
+              "x": 0.5,
+              "y": 8,
+              "w": 4.5,
+              "h": 2,
+              "sub": "endpoints",
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "gw",
+              "to": "gc",
+              "label": "classe"
+            },
+            {
+              "from": "hr",
+              "to": "gw",
+              "label": "parentRefs",
+              "accent": true
+            },
+            {
+              "from": "hr",
+              "to": "sv",
+              "label": "backendRefs"
+            },
+            {
+              "from": "sv",
+              "to": "pd",
+              "dashed": true
+            }
+          ],
+          "groups": [],
+          "caption": "Quem opera o cluster define Gateways (portas, TLS); times de aplicação anexam rotas no próprio namespace, sem tocar na infraestrutura."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: gateway.networking.k8s.io/v1\nkind: Gateway\nmetadata:\n  name: public\n  namespace: infra\nspec:\n  gatewayClassName: eg   # ex.: Envoy Gateway, Cilium, Istio\n  listeners:\n    - name: https\n      protocol: HTTPS\n      port: 443\n      hostname: \"*.exemplo.com\"\n      tls:\n        certificateRefs:\n          - name: wildcard-exemplo\n      allowedRoutes:\n        namespaces:\n          from: Selector\n          selector:\n            matchLabels:\n              acesso-gateway: \"true\"",
+          "file": "gateway.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: api\n  namespace: shop\nspec:\n  parentRefs:\n    - name: public\n      namespace: infra\n  hostnames: [\"api.exemplo.com\"]\n  rules:\n    - matches:\n        - path: {type: PathPrefix, value: /v1}\n      backendRefs:\n        - name: api-v1\n          port: 80\n          weight: 90\n        - name: api-v2    # canary 10%\n          port: 80\n          weight: 10",
+          "file": "httproute.yaml"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Ingress",
+            "Gateway API"
+          ],
+          "rows": [
+            [
+              "Modelo",
+              "Um recurso só",
+              "GatewayClass, Gateway, rotas separadas"
+            ],
+            [
+              "Papéis",
+              "Mistura infra e app",
+              "Infra no Gateway, rotas por time"
+            ],
+            [
+              "Recursos avançados",
+              "Annotations do fornecedor",
+              "Campos padrão: pesos, header match, redirect, mirror"
+            ],
+            [
+              "Protocolos",
+              "HTTP(S)",
+              "HTTP, gRPC (GRPCRoute), TLS/TCP e outros"
+            ],
+            [
+              "Cross-namespace",
+              "Não padronizado",
+              "`ReferenceGrant` explícito"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "A Gateway API é um conjunto de **CRDs** que você instala à parte (os canais standard e experimental têm versões distintas); só entra em ação se uma implementação, como Envoy Gateway, Cilium, Istio ou NGINX Gateway Fabric, estiver instalada. A ferramenta `ingress2gateway` ajuda a converter Ingresses existentes."
+        }
+      ]
+    },
+    {
+      "id": "networkpolicy",
+      "title": "NetworkPolicy: firewall entre Pods",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Por padrão, **todo Pod aceita tráfego de qualquer outro Pod** do cluster. Uma `NetworkPolicy` restringe isso, selecionando Pods e listando o que pode entrar (`ingress`) ou sair (`egress`)."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "NetworkPolicy é só uma API: quem a **aplica é o plugin CNI**. Em um cluster com Flannel puro ela é aceita pelo API server e **não faz nada**, sem erro algum. Teste sempre com um pedido que deveria falhar.",
+          "title": "Sem suporte do CNI, sem proteção"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Um Pod sem nenhuma política selecionando-o é **totalmente aberto**. No instante em que uma política o seleciona para um sentido, esse sentido vira \"negar tudo, exceto o que as políticas permitem\".",
+            "As políticas são **aditivas**: a união de todas as regras que selecionam o Pod. Não há \"regra de negar\" nem ordem.",
+            "As regras são **L3/L4**: IPs, CIDRs, namespaces, labels e portas; sem HTTP (Cilium e Calico têm extensões próprias para L7 e FQDN).",
+            "A política é avaliada em ambos os lados: para o tráfego passar, a origem deve poder sair (se tem egress restrito) **e** o destino deve poder receber."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: default-deny-all\n  namespace: shop\nspec:\n  podSelector: {}      # todos os Pods do namespace\n  policyTypes: [Ingress, Egress]",
+          "file": "default-deny.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: api-from-frontend\n  namespace: shop\nspec:\n  podSelector:\n    matchLabels: {app: api}\n  policyTypes: [Ingress]\n  ingress:\n    - from:\n        - podSelector:\n            matchLabels: {app: frontend}\n        - namespaceSelector:\n            matchLabels:\n              kubernetes.io/metadata.name: gateway\n      ports:\n        - {protocol: TCP, port: 8080}",
+          "file": "allow-frontend.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Atenção à sintaxe: dois itens sob `from` (cada um com `-`) são **OU**. Um único item com `podSelector` e `namespaceSelector` juntos é **E**. Essa diferença de um traço já abriu muita porta por engano."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: allow-dns-and-db\n  namespace: shop\nspec:\n  podSelector:\n    matchLabels: {app: api}\n  policyTypes: [Egress]\n  egress:\n    - to:\n        - namespaceSelector:\n            matchLabels:\n              kubernetes.io/metadata.name: kube-system\n          podSelector:\n            matchLabels: {k8s-app: kube-dns}\n      ports:\n        - {protocol: UDP, port: 53}\n        - {protocol: TCP, port: 53}\n    - to:\n        - podSelector:\n            matchLabels: {app: db}\n      ports:\n        - {protocol: TCP, port: 5432}",
+          "file": "egress.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Ao aplicar default-deny de **egress**, lembre-se de liberar o DNS (UDP/TCP 53 para o CoreDNS). Sem isso, tudo \"quebra\" com erros de resolução, e é o sintoma mais comum de quem adota políticas pela primeira vez."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ kubectl exec -n shop deploy/frontend -- \\\n    wget -qO- --timeout=3 http://api:8080/health\n$ kubectl exec -n shop deploy/other -- \\\n    wget -qO- --timeout=3 http://api:8080/health   # deve falhar",
+          "file": "testando a política"
+        }
+      ]
+    },
+    {
+      "id": "storage",
+      "title": "Armazenamento: Volumes, PV, PVC e StorageClass",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O sistema de arquivos de um container é descartável. Um **Volume** é um diretório montado no Pod, com ciclo de vida atrelado a ele (`emptyDir`, `configMap`, `secret`, `projected`) ou apontando para armazenamento externo. Para dados que sobrevivem ao Pod, o Kubernetes separa **quem consome** de **quem provê**."
+        },
+        {
+          "type": "diagram",
+          "title": "Do Pod ao disco",
+          "cols": 12,
+          "rows": 12.8,
+          "nodes": [
+            {
+              "id": "pod",
+              "label": "Pod",
+              "x": 0.5,
+              "y": 1.2,
+              "w": 4.5,
+              "h": 2,
+              "sub": "volumes: claimName"
+            },
+            {
+              "id": "pvc",
+              "label": "PVC",
+              "x": 7,
+              "y": 1.2,
+              "w": 4.5,
+              "h": 2,
+              "sub": "pedido: 20Gi RWO",
+              "variant": "accent"
+            },
+            {
+              "id": "sc",
+              "label": "StorageClass",
+              "x": 0.5,
+              "y": 5.8,
+              "w": 4.5,
+              "h": 2,
+              "sub": "driver · params"
+            },
+            {
+              "id": "pv",
+              "label": "PV",
+              "x": 7,
+              "y": 5.8,
+              "w": 4.5,
+              "h": 2,
+              "sub": "volume provisionado"
+            },
+            {
+              "id": "disk",
+              "label": "Disco real",
+              "x": 7,
+              "y": 10.4,
+              "w": 4.5,
+              "h": 2,
+              "sub": "EBS · Ceph · NFS",
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "pod",
+              "to": "pvc",
+              "label": "usa"
+            },
+            {
+              "from": "pvc",
+              "to": "pv",
+              "label": "bind",
+              "accent": true
+            },
+            {
+              "from": "sc",
+              "to": "pv",
+              "label": "cria via CSI",
+              "accent": true
+            },
+            {
+              "from": "pv",
+              "to": "disk",
+              "label": "CSI"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Namespace da aplicação",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 3.8
+            },
+            {
+              "label": "Escopo do cluster",
+              "x": 0,
+              "y": 4.6,
+              "w": 12,
+              "h": 4.2,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "O desenvolvedor pede (PVC); o administrador define classes (StorageClass); o driver CSI cria o volume e o PV que o representa."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**PersistentVolume (PV)**: o volume em si, recurso do cluster, sem namespace.",
+            "**PersistentVolumeClaim (PVC)**: o pedido de um usuário (tamanho, modo de acesso, classe), com namespace.",
+            "**StorageClass**: o \"molde\" para provisionamento dinâmico: qual driver e quais parâmetros (tipo de disco, IOPS, criptografia).",
+            "**CSI** (Container Storage Interface): padrão para drivers de armazenamento fora da árvore do Kubernetes; os plugins in-tree antigos foram migrados ou removidos."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: storage.k8s.io/v1\nkind: StorageClass\nmetadata:\n  name: ssd\nprovisioner: ebs.csi.aws.com\nparameters:\n  type: gp3\n  encrypted: \"true\"\nreclaimPolicy: Delete\nvolumeBindingMode: WaitForFirstConsumer\nallowVolumeExpansion: true",
+          "file": "storageclass.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: dados\n  namespace: shop\nspec:\n  accessModes: [ReadWriteOnce]\n  storageClassName: ssd\n  resources:\n    requests:\n      storage: 20Gi",
+          "file": "pvc.yaml"
+        },
+        {
+          "type": "h",
+          "text": "Modos de acesso"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Modo",
+            "Significado",
+            "Observação"
+          ],
+          "rows": [
+            [
+              "`ReadWriteOnce` (RWO)",
+              "Leitura e escrita por **um nó**",
+              "Vários Pods do mesmo nó podem usar"
+            ],
+            [
+              "`ReadOnlyMany` (ROX)",
+              "Somente leitura por vários nós",
+              "Comum em NFS e volumes de snapshot"
+            ],
+            [
+              "`ReadWriteMany` (RWX)",
+              "Leitura e escrita por vários nós",
+              "Precisa de FS compartilhado (NFS, CephFS, EFS)"
+            ],
+            [
+              "`ReadWriteOncePod` (RWOP)",
+              "Leitura e escrita por **um único Pod**",
+              "GA no 1.29; garante exclusividade de verdade"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Quando o disco é criado e o que acontece ao apagar"
+        },
+        {
+          "type": "p",
+          "text": "Com `volumeBindingMode: Immediate`, o disco nasce assim que o PVC existe, possivelmente em uma zona onde o Pod nunca poderá ser agendado. Com **`WaitForFirstConsumer`**, o provisionamento espera o scheduler escolher o nó e cria o disco na zona certa. Para discos zonais, é quase sempre o modo correto."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "reclaimPolicy",
+            "Ao apagar o PVC",
+            "Quando usar"
+          ],
+          "rows": [
+            [
+              "`Delete` (padrão do dinâmico)",
+              "PV e disco são **apagados**",
+              "Dados descartáveis, ambientes efêmeros"
+            ],
+            [
+              "`Retain`",
+              "PV fica `Released` com os dados; limpeza manual",
+              "Dados valiosos (bancos em produção)"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: snapshot.storage.k8s.io/v1\nkind: VolumeSnapshot\nmetadata:\n  name: dados-2026-10-18\n  namespace: shop\nspec:\n  volumeSnapshotClassName: csi-snap\n  source:\n    persistentVolumeClaimName: dados",
+          "file": "snapshot.yaml"
+        },
+        {
+          "type": "p",
+          "text": "Para restaurar, crie um novo PVC com `dataSource` apontando para o `VolumeSnapshot`. Snapshots dependem de CRDs e do controlador `external-snapshotter` (instalados à parte) e de um driver CSI que os suporte."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Snapshot **não é backup** se mora no mesmo sistema de armazenamento e na mesma conta do volume. Um backup de verdade (Velero, ferramentas do banco) precisa ficar fora do domínio de falha e ter restauração testada.",
+          "title": "Snapshot não é backup"
+        }
+      ]
+    },
+    {
+      "id": "seguranca-api",
+      "title": "Segurança da API: authn, authz e admission",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Todo acesso ao cluster passa pelo **kube-apiserver**. Cada requisição atravessa uma cadeia fixa de portões; se qualquer um recusar, ela termina ali."
+        },
+        {
+          "type": "diagram",
+          "title": "O caminho de uma requisição",
+          "cols": 12,
+          "rows": 12,
+          "nodes": [
+            {
+              "id": "cl",
+              "label": "Cliente",
+              "x": 0.5,
+              "y": 0.4,
+              "w": 4.5,
+              "h": 2,
+              "sub": "kubectl · Pod · CI"
+            },
+            {
+              "id": "an",
+              "label": "Autenticação",
+              "x": 7,
+              "y": 0.4,
+              "w": 4.5,
+              "h": 2,
+              "sub": "quem é você?"
+            },
+            {
+              "id": "az",
+              "label": "Autorização",
+              "x": 7,
+              "y": 3.8,
+              "w": 4.5,
+              "h": 2,
+              "sub": "RBAC · pode?",
+              "variant": "accent"
+            },
+            {
+              "id": "mu",
+              "label": "Mutating",
+              "x": 0.5,
+              "y": 3.8,
+              "w": 4.5,
+              "h": 2,
+              "sub": "webhooks · injeta"
+            },
+            {
+              "id": "sc",
+              "label": "Schema",
+              "x": 0.5,
+              "y": 7.2,
+              "w": 4.5,
+              "h": 2,
+              "sub": "valida campos"
+            },
+            {
+              "id": "va",
+              "label": "Validating",
+              "x": 7,
+              "y": 7.2,
+              "w": 4.5,
+              "h": 2,
+              "sub": "VAP · webhooks",
+              "variant": "accent"
+            },
+            {
+              "id": "et",
+              "label": "etcd",
+              "x": 7,
+              "y": 10.4,
+              "w": 4.5,
+              "h": 1.6,
+              "sub": "persistido"
+            }
+          ],
+          "edges": [
+            {
+              "from": "cl",
+              "to": "an"
+            },
+            {
+              "from": "an",
+              "to": "az",
+              "label": "identidade"
+            },
+            {
+              "from": "az",
+              "to": "mu",
+              "label": "permitido"
+            },
+            {
+              "from": "mu",
+              "to": "sc"
+            },
+            {
+              "from": "sc",
+              "to": "va"
+            },
+            {
+              "from": "va",
+              "to": "et",
+              "label": "grava",
+              "accent": true
+            }
+          ],
+          "groups": [],
+          "caption": "Falhou authn: 401. Falhou authz: 403. Barrado por admission: 403/422 com a mensagem da política. Só o que passa em tudo chega ao etcd."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Autenticação**: certificados de cliente, tokens de ServiceAccount, OIDC (SSO). Kubernetes não tem objeto \"User\": a identidade vem da credencial.",
+            "**Autorização**: quase sempre RBAC (junto com o authorizer de Node). Decide por verbo, recurso e namespace.",
+            "**Admission**: modifica (mutating) e valida (validating) o objeto. Aqui rodam Pod Security Admission, ResourceQuota, LimitRange, ValidatingAdmissionPolicy e webhooks externos."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "RBAC"
+        },
+        {
+          "type": "p",
+          "text": "RBAC é **aditivo e negado por padrão**: só existem permissões, nunca proibições. Um `Role` (namespaced) ou `ClusterRole` lista regras (apiGroups, resources, verbs); um `RoleBinding` ou `ClusterRoleBinding` liga a regra a um sujeito (usuário, grupo ou ServiceAccount)."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: leitor-de-pods\n  namespace: shop\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"pods\", \"pods/log\"]\n    verbs: [\"get\", \"list\", \"watch\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: ci-le-pods\n  namespace: shop\nsubjects:\n  - kind: ServiceAccount\n    name: ci\n    namespace: shop\nroleRef:\n  kind: Role\n  name: leitor-de-pods\n  apiGroup: rbac.authorization.k8s.io",
+          "file": "rbac.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ kubectl auth can-i list pods -n shop \\\n    --as=system:serviceaccount:shop:ci\nyes\n$ kubectl auth can-i delete secrets -n shop \\\n    --as=system:serviceaccount:shop:ci\nno\n$ kubectl auth can-i --list -n shop --as=system:serviceaccount:shop:ci",
+          "file": "auditando permissões"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Permissões que equivalem a **escalada de privilégio**: `*` em verbos/recursos, `get/list` em `secrets` (lê todas as senhas), `create` em `pods` (monta qualquer Secret ou roda privilegiado), `bind`/`escalate`/`impersonate` e `create` em `serviceaccounts/token`. Dê o mínimo e revise com `kubectl auth can-i --list`.",
+          "title": "Menor privilégio"
+        },
+        {
+          "type": "h",
+          "text": "ServiceAccounts e tokens projetados"
+        },
+        {
+          "type": "p",
+          "text": "Pods que falam com a API usam uma **ServiceAccount**. Desde o 1.22 o token montado é um JWT **projetado**: curto (por padrão 1h, renovado pelo kubelet), com audiência definida e **atrelado ao Pod** (invalida quando o Pod morre). Desde o 1.24, o Kubernetes não cria mais Secrets de token de longa duração automaticamente."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: app\nspec:\n  serviceAccountName: app\n  automountServiceAccountToken: false  # só monte se precisar\n  volumes:\n    - name: token\n      projected:\n        sources:\n          - serviceAccountToken:\n              audience: https://vault.exemplo.com\n              expirationSeconds: 3600\n              path: token",
+          "file": "token projetado"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ kubectl create token ci -n shop --duration=15m   # token efêmero"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Cada workload deve ter a **sua** ServiceAccount, com `automountServiceAccountToken: false` quando não chama a API. A `default` do namespace não deve receber nenhuma permissão."
+        }
+      ]
+    },
+    {
+      "id": "seguranca-pods",
+      "title": "Segurança de Pods e políticas",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um container não é uma fronteira de segurança forte: compartilha o kernel do nó. A defesa em profundidade combina **limitar o que o processo pode fazer** (securityContext) com **impedir que Pods inseguros sejam admitidos** (Pod Security e políticas)."
+        },
+        {
+          "type": "p",
+          "text": "O **PodSecurityPolicy** foi removido no 1.25. Seu substituto embutido é o **Pod Security Admission**, que aplica os três perfis dos *Pod Security Standards* por namespace, via labels."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Perfil",
+            "O que impede",
+            "Uso"
+          ],
+          "rows": [
+            [
+              "`privileged`",
+              "Nada: sem restrições",
+              "Componentes de sistema (CNI, CSI)"
+            ],
+            [
+              "`baseline`",
+              "Escalações conhecidas: hostNetwork, hostPath, privileged, capabilities perigosas",
+              "Mínimo razoável para apps comuns"
+            ],
+            [
+              "`restricted`",
+              "Tudo do baseline + exige não-root, seccomp, drop ALL de capabilities, sem escalonamento",
+              "Padrão ideal para aplicações"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: shop\n  labels:\n    pod-security.kubernetes.io/enforce: restricted\n    pod-security.kubernetes.io/enforce-version: latest\n    pod-security.kubernetes.io/warn: restricted\n    pod-security.kubernetes.io/audit: restricted",
+          "file": "namespace.yaml"
+        },
+        {
+          "type": "p",
+          "text": "Os três modos têm papéis distintos: `enforce` rejeita, `warn` avisa quem aplicou e `audit` registra no log de auditoria. Para adotar sem quebrar nada, comece com `warn` + `audit`, corrija os avisos e só então ligue `enforce`."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  securityContext:\n    runAsNonRoot: true\n    seccompProfile:\n      type: RuntimeDefault\n  containers:\n    - name: app\n      image: ghcr.io/acme/api:1.4.2\n      securityContext:\n        allowPrivilegeEscalation: false\n        readOnlyRootFilesystem: true\n        runAsUser: 10001\n        capabilities:\n          drop: [\"ALL\"]\n      volumeMounts:\n        - {name: tmp, mountPath: /tmp}\n  volumes:\n    - name: tmp\n      emptyDir: {}",
+          "file": "securityContext restrito"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`runAsNonRoot` + `runAsUser`: um processo comprometido não tem UID 0 dentro do container.",
+            "`allowPrivilegeEscalation: false`: bloqueia `setuid` e semelhantes.",
+            "`readOnlyRootFilesystem`: o atacante não grava binários; monte `emptyDir` onde a app precisa escrever.",
+            "`capabilities.drop: [ALL]`: remove os poderes do root; adicione só o necessário (ex.: `NET_BIND_SERVICE`).",
+            "`seccompProfile: RuntimeDefault`: filtra syscalls com a lista padrão do runtime."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Políticas além do PSA"
+        },
+        {
+          "type": "p",
+          "text": "O PSA cobre só o básico de Pods. Para regras próprias (\"imagens só do nosso registry\", \"toda Deployment tem limits\") há a **ValidatingAdmissionPolicy**, GA no 1.30: regras escritas em **CEL** e executadas dentro do API server, sem webhook externo para manter no ar."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: admissionregistration.k8s.io/v1\nkind: ValidatingAdmissionPolicy\nmetadata:\n  name: sem-latest\nspec:\n  failurePolicy: Fail\n  matchConstraints:\n    resourceRules:\n      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"CREATE\", \"UPDATE\"]\n        resources: [\"deployments\"]\n  validations:\n    - expression: >-\n        object.spec.template.spec.containers.all(c,\n          !c.image.endsWith(':latest'))\n      message: \"use tags fixas, nunca :latest\"\n---\napiVersion: admissionregistration.k8s.io/v1\nkind: ValidatingAdmissionPolicyBinding\nmetadata:\n  name: sem-latest-prod\nspec:\n  policyName: sem-latest\n  validationActions: [Deny]\n  matchResources:\n    namespaceSelector:\n      matchLabels: {env: prod}",
+          "file": "sem-latest.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "**Kyverno** e **OPA Gatekeeper** são motores de política maiores, via webhook: oferecem mutação, geração de recursos, verificação de assinatura de imagens e relatórios. Use VAP para regras simples e nativas; use um deles quando precisar disso.",
+          "title": "Kyverno e Gatekeeper"
+        }
+      ]
+    },
+    {
+      "id": "segredos",
+      "title": "Secrets: proteção em repouso e fontes externas",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um objeto `Secret` guarda os dados em **base64**, que é só codificação. Por padrão, o API server grava isso **em texto puro no etcd**. Quem lê o etcd (ou um backup dele) lê todas as senhas."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**RBAC rígido**: restrinja `get/list/watch` em `secrets`; `list` já devolve o conteúdo.",
+            "**Criptografia em repouso** no API server com `EncryptionConfiguration`.",
+            "**Prefira montar como arquivo** (volume) a variável de ambiente: env vaza com facilidade em logs, `describe` de crash e processos filhos.",
+            "**Fonte externa da verdade**: o cofre guarda o valor, o cluster só o sincroniza."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: apiserver.config.k8s.io/v1\nkind: EncryptionConfiguration\nresources:\n  - resources: [\"secrets\"]\n    providers:\n      - kms:\n          apiVersion: v2\n          name: meu-kms\n          endpoint: unix:///var/run/kms/socket.sock\n          timeout: 3s\n      - identity: {}   # ler dados antigos ainda sem cifra",
+          "file": "encryption-config.yaml"
+        },
+        {
+          "type": "p",
+          "text": "O primeiro provedor da lista é o que **cifra** novas escritas; os demais só servem para decifrar. Com **KMS v2** (GA no 1.29), cada Secret é cifrado com uma chave de dados (DEK) protegida por uma chave no KMS (nuvem ou HSM): a chave mestra nunca fica no disco do control plane. As opções locais `aescbc` e `secretbox` guardam a chave no próprio arquivo, o que protege só contra vazamento do etcd isolado."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# reescreve tudo para aplicar a criptografia aos Secrets antigos\n$ kubectl get secrets -A -o json | kubectl replace -f -\n# confere no etcd: deve começar com k8s:enc:kms:v2:\n$ etcdctl get /registry/secrets/shop/db-creds | head -c 40"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Em clusters gerenciados (EKS, GKE, AKS) a criptografia envelope com KMS costuma ser uma opção a ligar na criação. Verifique se está ativa: não é garantido por padrão."
+        },
+        {
+          "type": "p",
+          "text": "Para não colocar o valor no Git, use o **External Secrets Operator** (referência no Git, valor no Vault/Secrets Manager), o **Secrets Store CSI Driver** (monta o segredo direto no Pod, sem criar um Secret) ou cifre o YAML (Sealed Secrets, SOPS). O padrão é o mesmo da série de GitOps."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Um segredo exposto em log, imagem ou commit está comprometido. **Rotacione**; apagar o rastro não basta."
+        }
+      ]
+    },
+    {
+      "id": "troubleshooting",
+      "title": "Playbook de troubleshooting",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Depurar Kubernetes é seguir o objeto até a causa: **evento → status → log → ambiente**. O erro quase sempre está escrito em algum lugar; o trabalho é saber onde olhar."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Sintoma",
+            "Causas prováveis",
+            "Primeiro comando"
+          ],
+          "rows": [
+            [
+              "`Pending`",
+              "Sem recursos (requests), taints, afinidade, PVC sem PV, quota",
+              "`kubectl describe pod` (Events: FailedScheduling)"
+            ],
+            [
+              "`ImagePullBackOff`",
+              "Tag/imagem inexistente, registry privado sem `imagePullSecrets`, rate limit",
+              "`kubectl describe pod` (Events: Failed to pull)"
+            ],
+            [
+              "`CrashLoopBackOff`",
+              "Processo sai com erro, config/variável faltando, probe de liveness agressiva",
+              "`kubectl logs --previous`"
+            ],
+            [
+              "`OOMKilled` (exit 137)",
+              "Uso de memória acima do `limits.memory`",
+              "`describe` → Last State: Terminated, Reason: OOMKilled"
+            ],
+            [
+              "`CreateContainerConfigError`",
+              "ConfigMap/Secret ou chave referenciada não existe",
+              "`kubectl describe pod`"
+            ],
+            [
+              "Service sem resposta",
+              "Selector não casa, Pod não Ready, `targetPort` errado",
+              "`kubectl get endpointslices -l kubernetes.io/service-name=X`"
+            ],
+            [
+              "Falhas de DNS",
+              "CoreDNS fora, NetworkPolicy bloqueando 53, `ndots`",
+              "`nslookup` dentro de um Pod + logs do CoreDNS"
+            ],
+            [
+              "`Terminating` preso",
+              "Finalizer pendente, volume que não desmonta, nó `NotReady`",
+              "`kubectl get pod -o yaml` (metadata.finalizers)"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Fluxo de depuração de um Pod"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Veja o estado geral",
+              "text": "`kubectl get pod -o wide` mostra STATUS, restarts, nó e IP. Reinícios altos indicam crash; `Pending` indica agendamento."
+            },
+            {
+              "title": "Leia os eventos",
+              "text": "`kubectl describe pod X`: a seção Events no fim diz por que não foi agendado, por que a imagem falhou, por que a probe reprovou."
+            },
+            {
+              "title": "Leia os logs, inclusive do crash anterior",
+              "text": "`kubectl logs X -c app --previous` mostra a saída do container que acabou de morrer, que é a que importa em CrashLoopBackOff."
+            },
+            {
+              "title": "Entre no ambiente",
+              "text": "`kubectl exec` se a imagem tem shell; senão, use um **container efêmero** com ferramentas."
+            },
+            {
+              "title": "Isole a camada",
+              "text": "Pod responde direto no IP? E via Service? E via DNS? E de outro namespace? Cada resposta elimina uma camada."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ kubectl get events -A --sort-by=.lastTimestamp | tail -20\n$ kubectl describe pod api-7d9c -n shop\n$ kubectl logs api-7d9c -n shop --previous\n$ kubectl get pod api-7d9c -n shop \\\n    -o jsonpath='{.status.containerStatuses[0].lastState}'",
+          "file": "primeiros passos"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# imagem distroless sem shell? anexe um container de debug\n$ kubectl debug -it api-7d9c -n shop \\\n    --image=nicolaka/netshoot --target=app\n# dentro dele, compartilha rede e (com --target) processos:\n$ curl -sv http://localhost:8080/health\n$ ss -tlnp ; dig api.shop.svc.cluster.local\n\n# copia o Pod com outra imagem/comando para investigar\n$ kubectl debug api-7d9c -n shop -it --copy-to=api-dbg \\\n    --container=app -- sh",
+          "file": "containers efêmeros"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# o Service tem endpoints?\n$ kubectl get svc api -n shop -o wide\n$ kubectl get endpointslices -n shop \\\n    -l kubernetes.io/service-name=api\n# selector x labels dos Pods\n$ kubectl get pods -n shop -l app=api --show-labels\n# porta testada direto no Pod, ignorando o Service\n$ kubectl port-forward pod/api-7d9c 8080:8080 -n shop",
+          "file": "Service sem endpoints"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "`kubectl debug node/NO --image=...` cria um Pod privilegiado no nó, com o sistema de arquivos do host em `/host`: útil para olhar kubelet e runtime sem precisar de SSH.",
+          "title": "Depurando nós"
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Consequência",
+            "Como evitar"
+          ],
+          "rows": [
+            [
+              "NetworkPolicy com CNI que não suporta",
+              "Nenhuma proteção, sem erro algum",
+              "Use Calico/Cilium e teste com tráfego que deveria falhar"
+            ],
+            [
+              "Default-deny de egress sem liberar DNS",
+              "Tudo falha com erros de resolução",
+              "Inclua UDP/TCP 53 para o CoreDNS na política"
+            ],
+            [
+              "`from` com dois itens quando era para ser um",
+              "Regra aberta demais (OU em vez de E)",
+              "Revise a indentação; teste origens indevidas"
+            ],
+            [
+              "`ndots:5` com muito tráfego externo",
+              "Latência e carga no DNS",
+              "FQDN com ponto final ou `ndots` menor"
+            ],
+            [
+              "PVC `Immediate` em disco zonal",
+              "Pod `Pending` por falta de afinidade de zona",
+              "`WaitForFirstConsumer`"
+            ],
+            [
+              "`reclaimPolicy: Delete` em dados críticos",
+              "Apagar o PVC apaga o disco",
+              "`Retain` ou backup externo testado"
+            ],
+            [
+              "Confundir snapshot com backup",
+              "Perda junto com o volume original",
+              "Backup fora do domínio de falha"
+            ],
+            [
+              "`cluster-admin` para pipelines e devs",
+              "Qualquer comprometimento vira controle total",
+              "Roles mínimas por namespace; revisar com `can-i`"
+            ],
+            [
+              "Montar o token da SA sem necessidade",
+              "Roubo do token dá acesso à API",
+              "`automountServiceAccountToken: false`"
+            ],
+            [
+              "Secrets em texto puro no etcd e no Git",
+              "Vazamento por backup ou repositório",
+              "Criptografia KMS + cofre externo + rotação"
+            ],
+            [
+              "Rodar como root com FS gravável",
+              "Escalada fácil após uma falha na app",
+              "`restricted`: não-root, FS read-only, drop ALL"
+            ],
+            [
+              "Policy de admission com `failurePolicy: Fail` em webhook instável",
+              "API server bloqueia deploys se o webhook cair",
+              "Prefira VAP (in-process); exclua `kube-system`"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "CNI",
+              "def": "Container Network Interface: contrato entre o runtime e o plugin que configura a rede de cada Pod."
+            },
+            {
+              "term": "ClusterIP",
+              "def": "IP virtual de um Service, reescrito por kube-proxy ou eBPF; não pertence a nenhuma interface."
+            },
+            {
+              "term": "EndpointSlice",
+              "def": "Fatia da lista de endpoints (IP, nó, condições) de um Service, que substitui a API Endpoints."
+            },
+            {
+              "term": "DNAT",
+              "def": "Tradução do endereço de destino; é como o IP virtual vira o IP de um Pod."
+            },
+            {
+              "term": "conntrack",
+              "def": "Tabela do kernel que lembra as conexões e faz o caminho de volta da tradução."
+            },
+            {
+              "term": "Headless Service",
+              "def": "Service sem IP virtual; o DNS devolve os IPs dos Pods."
+            },
+            {
+              "term": "Gateway API",
+              "def": "API para tráfego L4/L7 com papéis separados (GatewayClass, Gateway, rotas); sucessora do Ingress."
+            },
+            {
+              "term": "NetworkPolicy",
+              "def": "Regra L3/L4 sobre quais Pods podem se comunicar; aplicada pelo CNI."
+            },
+            {
+              "term": "PV / PVC",
+              "def": "Volume provisionado (PV) e o pedido de um usuário por ele (PVC)."
+            },
+            {
+              "term": "StorageClass",
+              "def": "Molde de provisionamento dinâmico: driver CSI e parâmetros."
+            },
+            {
+              "term": "CSI",
+              "def": "Container Storage Interface: padrão para drivers de armazenamento."
+            },
+            {
+              "term": "RBAC",
+              "def": "Controle de acesso por papéis: Role/ClusterRole ligados a sujeitos por bindings."
+            },
+            {
+              "term": "Admission controller",
+              "def": "Etapa que modifica ou valida objetos após a autorização e antes de gravar no etcd."
+            },
+            {
+              "term": "Pod Security Standards",
+              "def": "Perfis privileged, baseline e restricted aplicados por namespace pelo Pod Security Admission."
+            },
+            {
+              "term": "CEL",
+              "def": "Common Expression Language, usada em ValidatingAdmissionPolicy."
+            },
+            {
+              "term": "Container efêmero",
+              "def": "Container adicionado a um Pod em execução só para depuração (`kubectl debug`)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos-passos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Esta é a última parte da série de Kubernetes: arquitetura e fundamentos, workloads e escalonamento, e agora rede, armazenamento e segurança. Com isso você tem o modelo mental completo para operar e depurar um cluster."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Série Argo CD**: coloque o cluster sob GitOps de verdade. Manifests, Applications, ApplicationSets, sync waves e RBAC de projetos sobre tudo o que viu aqui (políticas, quotas e NetworkPolicies também versionadas).",
+            "**Série Go**: aprenda a escrever **controladores e operadores** com client-go e controller-runtime, os mesmos loops de reconciliação que mantêm EndpointSlices, PVs e Gateways.",
+            "Pratique: crie um cluster local com kind ou minikube usando Cilium, aplique default-deny com liberação de DNS, e quebre de propósito Services, DNS e PVCs para exercitar o playbook."
+          ]
+        }
+      ]
+    }
+  ]
+}

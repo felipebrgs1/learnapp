@@ -89,7 +89,9 @@ class _LineChartState extends State<_LineChart> {
                         painter: _SwatchPainter(_toneColor(s.tone, c), s.dashed),
                       ),
                       const SizedBox(width: 6),
-                      Text(s.name, style: AppText.small.copyWith(color: c.textSecondary, fontSize: 12)),
+                      Flexible(
+                        child: Text(s.name, style: AppText.small.copyWith(color: c.textSecondary, fontSize: 12)),
+                      ),
                     ],
                   ),
               ],

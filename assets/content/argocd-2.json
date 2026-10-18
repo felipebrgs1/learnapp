@@ -1,0 +1,1840 @@
+{
+  "id": "argocd-2",
+  "title": "Argo CD 2 — Padrões avançados e operação",
+  "summary": "ApplicationSets, sync waves e hooks, multi-cluster, RBAC e SSO, Rollouts, segredos e como operar e recuperar o Argo CD em escala.",
+  "category": "DevOps",
+  "level": "Avançado",
+  "minutes": 45,
+  "updated": "out 2026",
+  "tags": [
+    "argocd",
+    "argo cd",
+    "applicationset",
+    "app of apps",
+    "sync waves",
+    "hooks",
+    "multi-cluster",
+    "rbac",
+    "sso",
+    "dex",
+    "argo rollouts",
+    "canary",
+    "image updater",
+    "gitops"
+  ],
+  "series": "Argo CD",
+  "part": 2,
+  "sections": [
+    {
+      "id": "app-of-apps",
+      "title": "App-of-apps vs ApplicationSet",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A parte 1 mostrou como **uma** `Application` funciona. Em produção você tem dezenas de serviços, vários ambientes e vários clusters: escrever e manter um `Application` por combinação vira a nova planilha de YAML. Esta parte cobre os padrões que escalam o catálogo, a orquestração do sync, a operação e a recuperação."
+        },
+        {
+          "type": "p",
+          "text": "Existem dois mecanismos para gerar `Application`s a partir de dados: **app-of-apps** (um `Application` raiz cujo conteúdo são outros `Application`s) e **ApplicationSet** (um controlador dedicado que gera `Application`s a partir de geradores + um molde)."
+        },
+        {
+          "type": "h",
+          "text": "App-of-apps"
+        },
+        {
+          "type": "p",
+          "text": "O `Application` raiz aponta para um diretório do Git cheio de manifests `kind: Application`. Como o Argo CD trata esses manifests como qualquer outro recurso, sincronizar a raiz cria os filhos; cada filho então sincroniza a sua própria carga. É só composição, sem nenhum componente novo."
+        },
+        {
+          "type": "diagram",
+          "title": "App-of-apps",
+          "cols": 12,
+          "rows": 10.2,
+          "nodes": [
+            {
+              "id": "root",
+              "label": "Application raiz",
+              "x": 3.5,
+              "y": 0.8,
+              "w": 5,
+              "h": 2,
+              "sub": "path: apps/",
+              "variant": "accent"
+            },
+            {
+              "id": "a1",
+              "label": "app: api",
+              "x": 0.2,
+              "y": 4.6,
+              "w": 3.6,
+              "h": 2,
+              "sub": "Application"
+            },
+            {
+              "id": "a2",
+              "label": "app: web",
+              "x": 4.2,
+              "y": 4.6,
+              "w": 3.6,
+              "h": 2,
+              "sub": "Application"
+            },
+            {
+              "id": "a3",
+              "label": "app: worker",
+              "x": 8.2,
+              "y": 4.6,
+              "w": 3.6,
+              "h": 2,
+              "sub": "Application"
+            },
+            {
+              "id": "r1",
+              "label": "Deploy · Svc",
+              "x": 0.2,
+              "y": 8.2,
+              "w": 3.6,
+              "h": 1.6,
+              "variant": "muted"
+            },
+            {
+              "id": "r2",
+              "label": "Deploy · Ing",
+              "x": 4.2,
+              "y": 8.2,
+              "w": 3.6,
+              "h": 1.6,
+              "variant": "muted"
+            },
+            {
+              "id": "r3",
+              "label": "Deploy · HPA",
+              "x": 8.2,
+              "y": 8.2,
+              "w": 3.6,
+              "h": 1.6,
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "root",
+              "to": "a1",
+              "label": "cria",
+              "accent": true
+            },
+            {
+              "from": "root",
+              "to": "a2",
+              "label": "cria",
+              "accent": true
+            },
+            {
+              "from": "root",
+              "to": "a3",
+              "label": "cria",
+              "accent": true
+            },
+            {
+              "from": "a1",
+              "to": "r1"
+            },
+            {
+              "from": "a2",
+              "to": "r2"
+            },
+            {
+              "from": "a3",
+              "to": "r3"
+            }
+          ],
+          "groups": [],
+          "caption": "A raiz só conhece Applications. Cada filho tem seu próprio ciclo de sync, saúde e histórico."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: root\n  namespace: argocd\n  finalizers:\n    - resources-finalizer.argocd.argoproj.io\nspec:\n  project: platform\n  source:\n    repoURL: https://git.exemplo.com/plataforma/config.git\n    targetRevision: main\n    path: apps\n    directory:\n      recurse: true\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: argocd\n  syncPolicy:\n    automated: { prune: true, selfHeal: true }",
+          "file": "root.yaml"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Vantagem:** simples, explícito, cada filho pode ter configuração totalmente diferente (Helm de um, Kustomize de outro).",
+            "**Limite:** repetição. Dez serviços × três ambientes são 30 arquivos quase iguais, e nada garante que fiquem consistentes.",
+            "**Limite:** o `Application` filho precisa morar no namespace do Argo CD e `project` próprio; quem escreve na pasta `apps/` escolhe o `AppProject` (ou seja, o limite de segurança) se você não protegê-la com code review."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "A raiz com prune apaga filhos",
+          "text": "Remover um arquivo de `apps/` com `prune: true` apaga o `Application` filho. Se o filho tem o finalizer `resources-finalizer.argocd.argoproj.io`, os recursos dele no cluster também são apagados. Isso é o comportamento desejado para decomissionar, e um desastre para um commit errado."
+        },
+        {
+          "type": "h",
+          "text": "ApplicationSet"
+        },
+        {
+          "type": "p",
+          "text": "O `ApplicationSet` é um CRD tratado por um controlador separado (`argocd-applicationset-controller`). Você descreve **de onde vêm os dados** (geradores) e **como é o Application** (template); o controlador mantém o conjunto de `Application`s igual ao resultado. Os gerados têm `ownerReference` para o ApplicationSet: edições manuais neles são sobrescritas, e apagar o set apaga os filhos."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Critério",
+            "App-of-apps",
+            "ApplicationSet"
+          ],
+          "rows": [
+            [
+              "Fonte da verdade",
+              "Manifests escritos à mão",
+              "Dados (diretórios, listas, clusters) + molde"
+            ],
+            [
+              "Novo ambiente/cluster",
+              "Copiar e editar arquivos",
+              "Entra automaticamente no gerador"
+            ],
+            [
+              "Customização por filho",
+              "Total",
+              "Via parâmetros e `templatePatch`"
+            ],
+            [
+              "Ordem entre filhos",
+              "Sync waves na raiz",
+              "Progressive sync (RollingSync)"
+            ],
+            [
+              "Risco típico",
+              "Drift entre cópias",
+              "Gerador vazio apaga tudo"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "title": "Regra prática",
+          "text": "Use ApplicationSet quando as Applications são **variações do mesmo molde** (um por cluster, por diretório, por PR). Use app-of-apps para o bootstrap da plataforma, onde cada peça é diferente. Os dois combinam: uma raiz que aplica ApplicationSets."
+        }
+      ]
+    },
+    {
+      "id": "geradores",
+      "title": "Geradores do ApplicationSet",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um gerador devolve uma **lista de mapas de parâmetros**. Para cada mapa, o controlador renderiza o template e produz um `Application`. Combinadores (Matrix, Merge) compõem geradores entre si."
+        },
+        {
+          "type": "diagram",
+          "title": "Como o ApplicationSet gera Applications",
+          "cols": 12,
+          "rows": 11.2,
+          "nodes": [
+            {
+              "id": "gen",
+              "label": "Geradores",
+              "x": 0,
+              "y": 0.4,
+              "w": 5,
+              "h": 2,
+              "sub": "lista de parâmetros"
+            },
+            {
+              "id": "tpl",
+              "label": "Template",
+              "x": 7,
+              "y": 0.4,
+              "w": 5,
+              "h": 2,
+              "sub": "molde de Application"
+            },
+            {
+              "id": "ctl",
+              "label": "Controlador",
+              "x": 3,
+              "y": 4.4,
+              "w": 6,
+              "h": 2.2,
+              "sub": "renderiza e reconcilia",
+              "variant": "accent"
+            },
+            {
+              "id": "x1",
+              "label": "app-dev",
+              "x": 0,
+              "y": 9,
+              "w": 3.6,
+              "h": 1.6
+            },
+            {
+              "id": "x2",
+              "label": "app-stg",
+              "x": 4.2,
+              "y": 9,
+              "w": 3.6,
+              "h": 1.6
+            },
+            {
+              "id": "x3",
+              "label": "app-prd",
+              "x": 8.4,
+              "y": 9,
+              "w": 3.6,
+              "h": 1.6
+            }
+          ],
+          "edges": [
+            {
+              "from": "gen",
+              "to": "ctl",
+              "label": "params"
+            },
+            {
+              "from": "tpl",
+              "to": "ctl",
+              "label": "molde"
+            },
+            {
+              "from": "ctl",
+              "to": "x1",
+              "label": "cria",
+              "accent": true
+            },
+            {
+              "from": "ctl",
+              "to": "x2",
+              "label": "cria",
+              "accent": true
+            },
+            {
+              "from": "ctl",
+              "to": "x3",
+              "label": "cria",
+              "accent": true
+            }
+          ],
+          "groups": [],
+          "caption": "O controlador compara o resultado com os Applications que ele possui: cria os novos, atualiza os divergentes e remove os que sumiram do gerador."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Gerador",
+            "Fonte dos parâmetros",
+            "Uso típico"
+          ],
+          "rows": [
+            [
+              "List",
+              "Lista fixa no YAML",
+              "Poucos alvos conhecidos"
+            ],
+            [
+              "Cluster",
+              "Secrets de cluster do Argo CD",
+              "Um app em todos os clusters (com seletor)"
+            ],
+            [
+              "Git · directories",
+              "Pastas de um repo",
+              "Um Application por serviço/pasta"
+            ],
+            [
+              "Git · files",
+              "Campos de arquivos JSON/YAML",
+              "Config por tenant/ambiente em arquivo"
+            ],
+            [
+              "Matrix",
+              "Produto cartesiano de 2 geradores",
+              "Pastas × clusters"
+            ],
+            [
+              "Merge",
+              "Mescla geradores por chave",
+              "Base + exceções por cluster"
+            ],
+            [
+              "SCM Provider",
+              "Repos de uma org (GitHub, GitLab...)",
+              "Um app por repositório"
+            ],
+            [
+              "Pull Request",
+              "PRs abertos",
+              "Ambientes de preview efêmeros"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "List e Cluster"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: ApplicationSet\nmetadata:\n  name: guestbook\n  namespace: argocd\nspec:\n  goTemplate: true\n  goTemplateOptions: [\"missingkey=error\"]\n  generators:\n    - list:\n        elements:\n          - { env: dev, replicas: \"1\" }\n          - { env: prd, replicas: \"5\" }\n  template:\n    metadata:\n      name: \"guestbook-{{ .env }}\"\n    spec:\n      project: default\n      source:\n        repoURL: https://git.exemplo.com/guestbook.git\n        targetRevision: main\n        path: \"overlays/{{ .env }}\"\n      destination:\n        server: https://kubernetes.default.svc\n        namespace: \"guestbook-{{ .env }}\"",
+          "file": "guestbook-appset.yaml"
+        },
+        {
+          "type": "p",
+          "text": "O gerador **Cluster** lê os Secrets rotulados `argocd.argoproj.io/secret-type: cluster`. Com `selector` você escolhe quais clusters recebem o app; os campos `name`, `server` e os rótulos/annotations do Secret viram parâmetros."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "generators:\n  - clusters:\n      selector:\n        matchLabels:\n          env: prod\n          addons/monitoring: \"true\"\ntemplate:\n  metadata:\n    name: \"monitoring-{{ .name }}\"\n  spec:\n    destination:\n      server: \"{{ .server }}\"\n      namespace: monitoring",
+          "file": "trecho"
+        },
+        {
+          "type": "h",
+          "text": "Git: directories e files"
+        },
+        {
+          "type": "p",
+          "text": "**Directories** cria um item por pasta que casa com o padrão (`path`, `path.basename`, `path.basenameNormalized` viram parâmetros). **Files** lê o conteúdo de arquivos JSON/YAML e expõe cada chave como parâmetro: ideal quando a configuração do ambiente é dado, não estrutura."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "generators:\n  - git:\n      repoURL: https://git.exemplo.com/plataforma/config.git\n      revision: main\n      directories:\n        - path: services/*\n        - path: services/legado-*\n          exclude: true",
+          "file": "trecho"
+        },
+        {
+          "type": "code",
+          "lang": "json",
+          "code": "{\n  \"cluster\": \"prod-eu\",\n  \"server\": \"https://eu.k8s.exemplo.com\",\n  \"replicas\": 6,\n  \"region\": \"eu-west-1\"\n}",
+          "file": "tenants/eu/config.json"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "generators:\n  - git:\n      repoURL: https://git.exemplo.com/plataforma/config.git\n      revision: main\n      files:\n        - path: \"tenants/*/config.json\"",
+          "file": "trecho"
+        },
+        {
+          "type": "h",
+          "text": "Matrix e Merge"
+        },
+        {
+          "type": "p",
+          "text": "**Matrix** gera o produto de dois geradores: o segundo pode usar parâmetros do primeiro. **Merge** pega um gerador base e sobrescreve campos de itens que tenham a mesma chave (`mergeKeys`) nos geradores seguintes."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "generators:\n  - matrix:\n      generators:\n        - git:\n            repoURL: https://git.exemplo.com/plataforma/config.git\n            revision: main\n            directories:\n              - path: services/*\n        - clusters:\n            selector:\n              matchLabels: { env: prod }",
+          "file": "matrix"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "generators:\n  - merge:\n      mergeKeys: [server]\n      generators:\n        - clusters:\n            values: { replicas: \"2\" }\n        - list:\n            elements:\n              - server: https://eu.k8s.exemplo.com\n                values.replicas: \"6\"",
+          "file": "merge"
+        },
+        {
+          "type": "h",
+          "text": "SCM Provider e Pull Request"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "generators:\n  - pullRequest:\n      github:\n        owner: exemplo\n        repo: loja\n        tokenRef:\n          secretName: github-token\n          key: token\n        labels: [preview]\n      requeueAfterSeconds: 120\ntemplate:\n  metadata:\n    name: \"loja-pr-{{ .number }}\"\n  spec:\n    source:\n      repoURL: https://github.com/exemplo/loja.git\n      targetRevision: \"{{ .head_sha }}\"\n      path: deploy/preview\n      kustomize:\n        nameSuffix: \"-pr{{ .number }}\"\n    destination:\n      server: https://kubernetes.default.svc\n      namespace: \"preview-pr{{ .number }}\"",
+          "file": "preview-appset.yaml"
+        },
+        {
+          "type": "p",
+          "text": "O gerador SCM Provider enumera repositórios de uma organização (filtros por nome, rótulo ou presença de arquivo `path`) e expõe `organization`, `repository`, `url`, `branch` e `sha`. Útil para dar um `Application` a cada repo que contém um `deploy/`."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "Limites de API",
+          "text": "Pull Request e SCM Provider consultam a API do provedor a cada `requeueAfterSeconds`. Com muitos repos/PRs você esgota o rate limit. Configure webhook do provedor para o endpoint do ApplicationSet controller e aumente o intervalo; sempre use token de escopo mínimo (`tokenRef`), nunca em texto no manifest."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "title": "Outros geradores",
+          "text": "Também existem **Cluster Decision Resource** (decisão vinda de outro CRD) e **Plugin** (um serviço HTTP seu devolve os parâmetros). Prefira os nativos; plugin é seu código para operar e proteger."
+        }
+      ]
+    },
+    {
+      "id": "templating",
+      "title": "Templating, progressive sync e segurança",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O padrão antigo de template (fasttemplate, `{{path.basename}}`) só substitui strings. Com `goTemplate: true` você usa Go templates com funções Sprig: condicionais, `default`, `lower`, `index`, `toJson`. É a opção recomendada e a que a documentação mostra como futura."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  goTemplate: true\n  goTemplateOptions: [\"missingkey=error\"]\n  template:\n    metadata:\n      name: \"{{ .path.basename }}-{{ .name }}\"\n      labels:\n        tier: '{{ index .metadata.labels \"tier\" | default \"std\" }}'\n    spec:\n      source:\n        path: \"{{ .path.path }}\"\n        helm:\n          valueFiles:\n            - \"values-{{ .metadata.labels.env | lower }}.yaml\"",
+          "file": "trecho"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "missingkey=error",
+          "text": "Sem `missingkey=error`, um parâmetro com nome errado vira `<no value>` e você cria um Application com `path` quebrado, em silêncio. Com a opção, o set falha na renderização e o erro aparece em `status.conditions`. No modo antigo (sem Go template), `{{ x }}` desconhecido simplesmente permanece literal."
+        },
+        {
+          "type": "p",
+          "text": "Para ajustar campos que não são strings (listas, mapas, um `syncPolicy` só em prod), use `templatePatch`: um template de texto que é aplicado como merge patch sobre o template principal."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "templatePatch: |\n  {{- if eq .env \"prd\" }}\n  spec:\n    syncPolicy:\n      automated: null\n  {{- end }}",
+          "file": "trecho"
+        },
+        {
+          "type": "h",
+          "text": "Políticas de segurança"
+        },
+        {
+          "type": "p",
+          "text": "O risco central: o ApplicationSet **possui** os `Application`s. Se o gerador devolver lista vazia (typo no `path`, cluster com rótulo removido, API do provedor fora), o controlador conclui que todos devem sumir. Com finalizer no template, isso apaga as cargas em produção."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Proteção",
+            "Onde",
+            "Efeito"
+          ],
+          "rows": [
+            [
+              "`preserveResourcesOnDeletion: true`",
+              "`spec.syncPolicy` do set",
+              "Apagar Application/set não apaga os recursos"
+            ],
+            [
+              "`applicationsSync: create-update`",
+              "`spec.syncPolicy` do set",
+              "Nunca deleta Applications, só cria/atualiza"
+            ],
+            [
+              "`--policy` do controller",
+              "`argocd-cmd-params-cm`",
+              "Mesmo efeito, global para todos os sets"
+            ],
+            [
+              "Sem finalizer no template",
+              "`template.metadata`",
+              "Remover o Application não cascateia"
+            ],
+            [
+              "Revisão obrigatória",
+              "Repo dos sets",
+              "Mudar gerador exige PR aprovado"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  syncPolicy:\n    preserveResourcesOnDeletion: true\n    applicationsSync: create-update",
+          "file": "trecho"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "title": "Gerador vazio + cascade",
+          "text": "Para produção, combine `applicationsSync: create-update` com `preserveResourcesOnDeletion: true` e proteja o repo dos ApplicationSets com CODEOWNERS. A pior falha é silenciosa: o controlador faz exatamente o que o dado manda."
+        },
+        {
+          "type": "h",
+          "text": "Progressive sync (RollingSync)"
+        },
+        {
+          "type": "p",
+          "text": "Por padrão todos os Applications gerados sincronizam ao mesmo tempo. Com **progressive syncs** o set os libera em estágios, esperando os do estágio anterior ficarem `Healthy`. Ainda é um recurso opt-in (habilite `applicationsetcontroller.enable.progressive.syncs: \"true\"` em `argocd-cmd-params-cm`) e o controller assume o disparo do sync, então não use `automated` nos filhos."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  strategy:\n    type: RollingSync\n    rollingSync:\n      steps:\n        - matchExpressions:\n            - { key: env, operator: In, values: [dev] }\n        - matchExpressions:\n            - { key: env, operator: In, values: [stg] }\n          maxUpdate: 1\n        - matchExpressions:\n            - { key: env, operator: In, values: [prd] }\n          maxUpdate: 25%\n  template:\n    metadata:\n      labels:\n        env: \"{{ .env }}\"",
+          "file": "trecho"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Os passos casam **rótulos** dos Applications gerados (por isso o template define `labels`).",
+            "`maxUpdate` limita quantos do passo sincronizam em paralelo (número ou porcentagem).",
+            "Se um Application do passo falha, os passos seguintes não começam: é um freio de mão por construção.",
+            "É progressivo **entre** Applications. Dentro de um Application use waves; para canary de tráfego use Argo Rollouts (seção adiante)."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "waves",
+      "title": "Fases e waves de sync",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um sync não é um `kubectl apply` único. O Argo CD o executa em **fases** e, dentro de cada uma, em **waves** ordenadas, esperando a saúde dos recursos antes de avançar. Isso permite migrações antes do deploy e testes depois."
+        },
+        {
+          "type": "diagram",
+          "title": "Linha do tempo de um sync",
+          "cols": 12,
+          "rows": 15.4,
+          "nodes": [
+            {
+              "id": "pre",
+              "label": "PreSync",
+              "x": 0,
+              "y": 0.2,
+              "w": 7.5,
+              "h": 1.8,
+              "sub": "Job migrate-db (hook)",
+              "variant": "accent"
+            },
+            {
+              "id": "w1",
+              "label": "Sync · wave -1",
+              "x": 0,
+              "y": 3.4,
+              "w": 7.5,
+              "h": 1.8,
+              "sub": "Namespace · CRD · Secret"
+            },
+            {
+              "id": "w0",
+              "label": "Sync · wave 0",
+              "x": 0,
+              "y": 6.6,
+              "w": 7.5,
+              "h": 1.8,
+              "sub": "Deployment · Service"
+            },
+            {
+              "id": "w2",
+              "label": "Sync · wave 1",
+              "x": 0,
+              "y": 9.8,
+              "w": 7.5,
+              "h": 1.8,
+              "sub": "Ingress · ServiceMonitor"
+            },
+            {
+              "id": "post",
+              "label": "PostSync",
+              "x": 0,
+              "y": 13,
+              "w": 7.5,
+              "h": 2,
+              "sub": "Job smoke-test",
+              "variant": "accent"
+            },
+            {
+              "id": "fail",
+              "label": "SyncFail",
+              "x": 8.4,
+              "y": 6.6,
+              "w": 3.6,
+              "h": 1.8,
+              "sub": "alerta",
+              "variant": "dashed"
+            }
+          ],
+          "edges": [
+            {
+              "from": "pre",
+              "to": "w1"
+            },
+            {
+              "from": "w1",
+              "to": "w0"
+            },
+            {
+              "from": "w0",
+              "to": "w2"
+            },
+            {
+              "from": "w2",
+              "to": "post"
+            },
+            {
+              "from": "w0",
+              "to": "fail",
+              "dashed": true
+            }
+          ],
+          "groups": [],
+          "caption": "Ordem: fase, depois wave crescente. Entre uma wave e a próxima o Argo CD espera Healthy (e aguarda ~2 s, ajustável por `ARGOCD_SYNC_WAVE_DELAY`). Se algo falha, roda SyncFail."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Fase",
+            "Quando roda",
+            "Uso comum"
+          ],
+          "rows": [
+            [
+              "`PreSync`",
+              "Antes de aplicar qualquer manifest",
+              "Migração de banco, backup, validação"
+            ],
+            [
+              "`Sync`",
+              "Junto dos recursos normais, em waves",
+              "Hook que precisa de ordem entre recursos"
+            ],
+            [
+              "`PostSync`",
+              "Depois de tudo Healthy",
+              "Smoke test, notificação, warm-up de cache"
+            ],
+            [
+              "`SyncFail`",
+              "Quando o sync falha",
+              "Rollback manual, alerta, limpeza"
+            ],
+            [
+              "`PostDelete`",
+              "Após o Application ser removido",
+              "Limpeza de dependências externas"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Um hook é um recurso comum (quase sempre `Job`) com a annotation `argocd.argoproj.io/hook`. Ele não entra no diff do app: é criado a cada sync e tratado conforme a política de remoção."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: migrate-db\n  annotations:\n    argocd.argoproj.io/hook: PreSync\n    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation\nspec:\n  backoffLimit: 1\n  activeDeadlineSeconds: 300\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n        - name: migrate\n          image: ghcr.io/exemplo/api:1.4.2\n          args: [\"migrate\", \"up\"]",
+          "file": "migrate-job.yaml"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "hook-delete-policy",
+            "Comportamento"
+          ],
+          "rows": [
+            [
+              "`HookSucceeded`",
+              "Apaga o hook quando termina com sucesso"
+            ],
+            [
+              "`HookFailed`",
+              "Apaga o hook se ele falhar"
+            ],
+            [
+              "`BeforeHookCreation`",
+              "Apaga o anterior antes de criar o novo (padrão)"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "title": "Nome fixo + BeforeHookCreation",
+          "text": "Com nome fixo, `BeforeHookCreation` mantém o último Job para você ler os logs após uma falha. Com `generateName` e `HookSucceeded` o cluster fica limpo, mas você perde o histórico."
+        },
+        {
+          "type": "h",
+          "text": "Waves"
+        },
+        {
+          "type": "p",
+          "text": "Anote com `argocd.argoproj.io/sync-wave: \"N\"` (inteiro, também negativo; padrão `0`). Dentro de uma fase a ordem é: wave crescente, depois tipo (Namespace e CRDs vêm antes) e então nome. Um recurso só libera a wave seguinte quando fica `Healthy`."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: pagamentos\n  annotations:\n    argocd.argoproj.io/sync-wave: \"-1\"\n---\napiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: api\n  annotations:\n    argocd.argoproj.io/sync-wave: \"1\"",
+          "file": "waves.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "Waves valem dentro de um Application",
+          "text": "A ordenação não atravessa Applications. Para ordenar filhos de uma raiz, anote os próprios `Application`s com sync-wave: a raiz espera cada filho ficar `Healthy` antes da wave seguinte. Para ordenar entre sets, use RollingSync."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "title": "Hook preso trava o sync",
+          "text": "Um Job de PreSync que nunca termina (sem `activeDeadlineSeconds`, imagem que não baixa, DB inacessível) deixa a operação em `Running` indefinidamente e nada é implantado. Sempre defina `backoffLimit` e `activeDeadlineSeconds`; para destravar use `argocd app terminate-op`."
+        }
+      ]
+    },
+    {
+      "id": "helm-kustomize",
+      "title": "Helm, Kustomize e plugins",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "Helm sem helm install"
+        },
+        {
+          "type": "p",
+          "text": "O Argo CD roda `helm template` e aplica o resultado como manifests comuns. Consequências: não há release (`helm list` vem vazio), `lookup` não enxerga o cluster, `helm rollback` não existe e os hooks do Helm são mapeados para hooks do Argo (`pre-install`/`pre-upgrade` → PreSync, `post-*` → PostSync). Para valores prefira `valuesObject` (YAML estruturado, evita string multilinha)."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  source:\n    repoURL: https://charts.exemplo.com\n    chart: api\n    targetRevision: 3.8.*\n    helm:\n      releaseName: api\n      skipCrds: false\n      valueFiles:\n        - values-prod.yaml\n      valuesObject:\n        replicaCount: 4\n        image:\n          tag: \"1.4.2\"",
+          "file": "trecho"
+        },
+        {
+          "type": "h",
+          "text": "Múltiplas sources e $values"
+        },
+        {
+          "type": "p",
+          "text": "O problema clássico: o chart é de terceiros, mas os valores são seus. Com `sources` (plural) uma fonte pode ser apenas uma **referência** (`ref`) e outra a consome por `$ref/caminho`."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  sources:\n    - repoURL: https://prometheus-community.github.io/helm-charts\n      chart: kube-prometheus-stack\n      targetRevision: 70.*\n      helm:\n        valueFiles:\n          - $values/monitoring/values-prod.yaml\n    - repoURL: https://git.exemplo.com/plataforma/config.git\n      targetRevision: main\n      ref: values",
+          "file": "trecho"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "title": "Limites de multi-source",
+          "text": "Rollback pelo histórico do Argo CD não é suportado para Applications com várias sources, e a UI mostra apenas uma revisão por vez. Fixe `targetRevision` do chart com uma faixa que você aceite (ou exato) e do repo de valores com tag/commit em produção."
+        },
+        {
+          "type": "h",
+          "text": "Kustomize"
+        },
+        {
+          "type": "p",
+          "text": "`kustomize.patches`, `images`, `namePrefix` e `components` podem ser declarados no próprio Application, sem tocar no repo base: bom para reuso entre ambientes. Flags de build globais (como `--enable-helm`) ficam em `kustomize.buildOptions` no `argocd-cm`."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "spec:\n  source:\n    repoURL: https://git.exemplo.com/plataforma/config.git\n    path: apps/api/base\n    kustomize:\n      images:\n        - ghcr.io/exemplo/api:1.4.2\n      components:\n        - ../../components/otel\n      patches:\n        - target: { kind: Deployment, name: api }\n          patch: |-\n            - op: replace\n              path: /spec/replicas\n              value: 6",
+          "file": "trecho"
+        },
+        {
+          "type": "h",
+          "text": "Config Management Plugins (sidecar)"
+        },
+        {
+          "type": "p",
+          "text": "Para Jsonnet, cdk8s, SOPS, Tanka ou qualquer gerador próprio existem os CMPs. Desde a 2.8 o único formato suportado é o **sidecar**: um container ao lado do repo-server executa `argocd-cmp-server` com o seu `plugin.yaml`. O plugin antigo configurado em `argocd-cm` foi removido."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: ConfigManagementPlugin\nmetadata:\n  name: cdk8s\nspec:\n  version: v1.0\n  init:\n    command: [sh, -c, \"npm ci\"]\n  generate:\n    command: [sh, -c, \"npx cdk8s synth --stdout\"]\n  discover:\n    fileName: \"cdk8s.yaml\"",
+          "file": "/home/argocd/cmp-server/config/plugin.yaml"
+        },
+        {
+          "type": "list",
+          "items": [
+            "O plugin precisa imprimir **somente** manifests YAML no stdout; logs vão para stderr.",
+            "No Application: `source.plugin.name: cdk8s-v1.0` (ou deixe a regra `discover` escolher).",
+            "O sidecar é um container com sua própria imagem: ferramentas e dependências ficam isoladas do repo-server."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "CMP executa código",
+          "text": "Todo `generate` roda comandos com acesso ao conteúdo do repositório. Trate o plugin como cadeia de suprimentos: imagem fixada por digest, sem credenciais montadas, e repositórios restritos por AppProject."
+        }
+      ]
+    },
+    {
+      "id": "multicluster",
+      "title": "Multi-cluster e escala",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "Registrando clusters"
+        },
+        {
+          "type": "p",
+          "text": "Um destino é um **Secret** no namespace do Argo CD rotulado `argocd.argoproj.io/secret-type: cluster`. A CLI cria um `ServiceAccount` `argocd-manager` no cluster alvo com um `ClusterRole` (por padrão `cluster-admin`) e guarda o token."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kubectl config get-contexts -o name\nargocd cluster add prod-eu --name prod-eu \\\n  --label env=prod --label region=eu\nargocd cluster list\n# restringir o escopo ao namespace:\nargocd cluster add prod-eu --namespace app-a --namespace app-b"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: cluster-prod-eu\n  namespace: argocd\n  labels:\n    argocd.argoproj.io/secret-type: cluster\n    env: prod\ntype: Opaque\nstringData:\n  name: prod-eu\n  server: https://eu.k8s.exemplo.com\n  config: |\n    {\n      \"execProviderConfig\": {\n        \"command\": \"argocd-k8s-auth\",\n        \"args\": [\"aws\", \"--cluster-name\", \"prod-eu\"],\n        \"apiVersion\": \"client.authentication.k8s.io/v1beta1\"\n      },\n      \"tlsClientConfig\": { \"caData\": \"<base64>\" }\n    }",
+          "file": "cluster-prod-eu.yaml"
+        },
+        {
+          "type": "p",
+          "text": "Prefira credenciais de curta duração (IAM, Workload Identity via `execProviderConfig` ou `awsAuthConfig`) a tokens estáticos de ServiceAccount."
+        },
+        {
+          "type": "diagram",
+          "title": "Hub-and-spoke",
+          "cols": 12,
+          "rows": 8.0,
+          "nodes": [
+            {
+              "id": "hub",
+              "label": "Argo CD central",
+              "x": 3.5,
+              "y": 0.8,
+              "w": 5,
+              "h": 2,
+              "sub": "controllers",
+              "variant": "accent"
+            },
+            {
+              "id": "c1",
+              "label": "prod-eu",
+              "x": 0.2,
+              "y": 5.6,
+              "w": 3.6,
+              "h": 2,
+              "sub": "cluster"
+            },
+            {
+              "id": "c2",
+              "label": "prod-us",
+              "x": 4.2,
+              "y": 5.6,
+              "w": 3.6,
+              "h": 2,
+              "sub": "cluster"
+            },
+            {
+              "id": "c3",
+              "label": "staging",
+              "x": 8.2,
+              "y": 5.6,
+              "w": 3.6,
+              "h": 2,
+              "sub": "cluster"
+            }
+          ],
+          "edges": [
+            {
+              "from": "hub",
+              "to": "c1",
+              "label": "apply",
+              "accent": true
+            },
+            {
+              "from": "hub",
+              "to": "c2",
+              "label": "apply",
+              "accent": true
+            },
+            {
+              "from": "hub",
+              "to": "c3",
+              "label": "apply",
+              "accent": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Cluster de gestão",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 3.8
+            }
+          ],
+          "caption": "Uma única UI e um único plano de controle. O custo: o hub guarda credenciais de todos os spokes e precisa alcançar a API de cada um."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Hub-and-spoke",
+            "Argo CD por cluster"
+          ],
+          "rows": [
+            [
+              "Visibilidade",
+              "Uma UI para tudo",
+              "Uma UI por cluster (ou agregador)"
+            ],
+            [
+              "Raio de explosão",
+              "Comprometer o hub = acesso a todos",
+              "Limitado ao cluster"
+            ],
+            [
+              "Rede",
+              "Hub alcança as APIs (VPN/peering)",
+              "Só saída para o Git"
+            ],
+            [
+              "Operação",
+              "Um Argo CD para atualizar e vigiar",
+              "N instâncias para atualizar"
+            ],
+            [
+              "Escala",
+              "Um controller com milhares de apps",
+              "Carga distribuída por natureza"
+            ],
+            [
+              "Falha do plano",
+              "Para todos os deploys",
+              "Afeta só aquele cluster"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Um meio-termo comum: um Argo CD por região ou por ambiente (prod separado de não-prod), com ApplicationSets por instância."
+        },
+        {
+          "type": "h",
+          "text": "Sharding e parâmetros de escala"
+        },
+        {
+          "type": "p",
+          "text": "O application-controller é um StatefulSet. Cada réplica (shard) é dona de **clusters inteiros**, não de apps: o cluster é a unidade de distribuição. Consequência: um único cluster gigante não se divide entre shards. O algoritmo (`legacy`, `round-robin`, `consistent-hashing`) é escolhido em `controller.sharding.algorithm`."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: argocd-cmd-params-cm\n  namespace: argocd\ndata:\n  controller.status.processors: \"50\"\n  controller.operation.processors: \"25\"\n  controller.repo.server.timeout.seconds: \"120\"\n  controller.sharding.algorithm: consistent-hashing\n  reposerver.parallelism.limit: \"10\"",
+          "file": "argocd-cmd-params-cm.yaml"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Parâmetro",
+            "O que controla",
+            "Quando mexer"
+          ],
+          "rows": [
+            [
+              "Réplicas do controller",
+              "Shards (clusters por réplica)",
+              "Muitos clusters; CPU/memória do controller alta"
+            ],
+            [
+              "`controller.status.processors`",
+              "Reconciliações de status em paralelo (padrão 20)",
+              "Fila de refresh longa"
+            ],
+            [
+              "`controller.operation.processors`",
+              "Syncs em paralelo (padrão 10)",
+              "Muitos syncs simultâneos esperando"
+            ],
+            [
+              "`reposerver.parallelism.limit`",
+              "Renderizações simultâneas por repo-server",
+              "Repo-server com OOM ou CPU saturada"
+            ],
+            [
+              "`timeout.reconciliation` (argocd-cm)",
+              "Intervalo de refresh completo (padrão 180s + jitter)",
+              "Aumentar com webhooks ativos"
+            ],
+            [
+              "Réplicas do repo-server",
+              "Capacidade de render e cache",
+              "Monorepos, Helm pesado"
+            ]
+          ]
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Tempo de ciclo de reconciliação vs. nº de apps",
+          "xLabel": "applications",
+          "yLabel": "SEGUNDOS",
+          "series": [
+            {
+              "name": "1 réplica, defaults",
+              "tone": "primary",
+              "points": [
+                [
+                  100,
+                  8
+                ],
+                [
+                  500,
+                  35
+                ],
+                [
+                  1000,
+                  80
+                ],
+                [
+                  2000,
+                  190
+                ],
+                [
+                  3000,
+                  330
+                ]
+              ]
+            },
+            {
+              "name": "3 réplicas + processors maiores",
+              "tone": "accent",
+              "points": [
+                [
+                  100,
+                  6
+                ],
+                [
+                  500,
+                  14
+                ],
+                [
+                  1000,
+                  26
+                ],
+                [
+                  2000,
+                  55
+                ],
+                [
+                  3000,
+                  90
+                ]
+              ]
+            }
+          ],
+          "caption": "Dados ilustrativos, não uma medição: o formato mostra que a latência cresce mais que linearmente com a fila de apps por controller, e que shards e processors achatam a curva. Meça no seu ambiente com as métricas `argocd_app_reconcile`."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Ative **webhooks** do provedor Git e aumente `timeout.reconciliation`: menos polling, deploy mais rápido.",
+            "Em monorepo, anote o Application com `argocd.argoproj.io/manifest-generate-paths: .` (ou caminhos) para só reprocessar quando os arquivos relevantes mudam.",
+            "Exclua recursos ruidosos do tracking (`resource.exclusions`: Events, EndpointSlices) para reduzir a carga do cache do cluster.",
+            "Observe `argocd_app_reconcile`, `argocd_repo_pending_request_total` e a profundidade das filas antes de ajustar às cegas."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rbac-sso",
+      "title": "RBAC e SSO",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O RBAC do Argo CD é independente do RBAC do Kubernetes: ele decide quem pode ver, sincronizar ou apagar `Application`s. O arquivo é `policy.csv` em `argocd-rbac-cm`, com sintaxe Casbin."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: argocd-rbac-cm\n  namespace: argocd\ndata:\n  policy.default: role:readonly\n  policy.matchMode: glob\n  scopes: \"[groups, email]\"\n  policy.csv: |\n    p, role:dev, applications, get, */*, allow\n    p, role:dev, applications, sync, dev-*/*, allow\n    p, role:dev, logs, get, dev-*/*, allow\n    p, role:sre, applications, *, */*, allow\n    p, role:sre, clusters, get, *, allow\n    p, role:ci, applications, sync, loja/*, allow\n    g, exemplo:devs, role:dev\n    g, exemplo:sre, role:sre",
+          "file": "argocd-rbac-cm.yaml"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Campo",
+            "Significado"
+          ],
+          "rows": [
+            [
+              "`p, sujeito, recurso, ação, objeto, efeito`",
+              "Permissão; o objeto de `applications` é `projeto/app`"
+            ],
+            [
+              "`g, sujeito, role`",
+              "Mapeia usuário ou grupo SSO para uma role"
+            ],
+            [
+              "Recursos",
+              "`applications`, `applicationsets`, `clusters`, `projects`, `repositories`, `logs`, `exec`, `accounts`"
+            ],
+            [
+              "Ações",
+              "`get`, `create`, `update`, `delete`, `sync`, `override`, `action/*`"
+            ],
+            [
+              "`policy.default`",
+              "Role dada a quem autentica mas não casa nenhuma regra"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "title": "Mudanças da série 3.x",
+          "text": "A partir da 3.0, `update` e `delete` em um Application **não** se estendem mais aos sub-recursos: conceda `update/*` ou `delete/*` explicitamente. Além disso o acesso a `logs` passou a ser checado por padrão. Revise as policies ao migrar da 2.x."
+        },
+        {
+          "type": "list",
+          "items": [
+            "`exec` (terminal no pod) é desabilitado por padrão e deve ser dado só a poucos.",
+            "Com `policy.matchMode: regex` os objetos viram expressões regulares; o padrão `glob` é mais seguro de ler.",
+            "Prefira conceder por **grupo do IdP**, não por usuário; `scopes` define de qual claim os grupos vêm."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Roles de projeto e tokens JWT"
+        },
+        {
+          "type": "p",
+          "text": "Para automação (CI, bots) crie uma role **dentro do AppProject**, com permissões limitadas àquele projeto, e emita um token JWT para ela."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: AppProject\nmetadata:\n  name: loja\n  namespace: argocd\nspec:\n  roles:\n    - name: ci\n      description: pipeline de release\n      policies:\n        - p, proj:loja:ci, applications, sync, loja/*, allow\n      groups:\n        - exemplo:release-bots",
+          "file": "appproject-loja.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "argocd proj role create-token loja ci --expires-in 24h\nargocd proj role list-tokens loja ci\nargocd proj role delete-token loja ci <iat>"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "Tokens estáticos",
+          "text": "O token é um JWT que vale até expirar ou ser revogado. Use sempre `--expires-in`, guarde em cofre e rotacione. Para contas locais (`accounts.ci: apiKey` em `argocd-cm`), idem. Onde possível troque tokens por OIDC com identidade de workload."
+        },
+        {
+          "type": "h",
+          "text": "SSO com Dex ou OIDC direto"
+        },
+        {
+          "type": "p",
+          "text": "O Argo CD embute o **Dex** como proxy de identidade (GitHub, LDAP, SAML...). Se o seu IdP fala OIDC (Okta, Entra ID, Keycloak, Google), configure `oidc.config` e dispense o Dex."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "data:\n  url: https://argocd.exemplo.com\n  admin.enabled: \"false\"\n  oidc.config: |\n    name: Keycloak\n    issuer: https://sso.exemplo.com/realms/plataforma\n    clientID: argocd\n    clientSecret: $oidc.keycloak.clientSecret\n    requestedScopes: [openid, profile, email, groups]",
+          "file": "argocd-cm.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "title": "Desligue o admin",
+          "text": "Depois que o SSO funcionar, defina `admin.enabled: \"false\"`. A conta `admin` com senha compartilhada é o atalho que anula toda a trilha de auditoria. O valor `$oidc.keycloak.clientSecret` é lido do Secret `argocd-secret`, nunca fica no ConfigMap."
+        }
+      ]
+    },
+    {
+      "id": "image-notif",
+      "title": "Image Updater e Notifications",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "Argo CD Image Updater"
+        },
+        {
+          "type": "p",
+          "text": "Fecha o loop de \"imagem nova no registry\" sem pipeline escrevendo no Git. Ele **não faz parte do Argo CD**: é um projeto separado (`argoproj-labs`), com ciclo de releases próprio. Na série 0.x a configuração era por annotations no Application; a linha 1.x migrou para um CRD próprio (`ImageUpdater`). Confira a documentação da versão instalada, pois a forma de configurar mudou entre elas."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Write-back",
+            "Onde grava",
+            "Prós e contras"
+          ],
+          "rows": [
+            [
+              "`argocd`",
+              "Parâmetros no `spec` do Application (override)",
+              "Simples, mas **não vai ao Git**: se o Application é recriado, perde-se; viola GitOps"
+            ],
+            [
+              "`git`",
+              "Commit no repo (`.argocd-source-<app>.yaml` ou kustomization)",
+              "Auditável e reproduzível; exige credencial de escrita"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "metadata:\n  annotations:\n    argocd-image-updater.argoproj.io/image-list: api=ghcr.io/exemplo/api\n    argocd-image-updater.argoproj.io/api.update-strategy: semver\n    argocd-image-updater.argoproj.io/api.allow-tags: regexp:^1\\.\\d+\\.\\d+$\n    argocd-image-updater.argoproj.io/write-back-method: git\n    argocd-image-updater.argoproj.io/git-branch: main",
+          "file": "annotations (série 0.x)"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Estratégia",
+            "Escolhe"
+          ],
+          "rows": [
+            [
+              "`semver`",
+              "Maior versão dentro de uma restrição (`~1.4`, `>=1`)"
+            ],
+            [
+              "`newest-build`",
+              "Imagem mais recente por data de build (nome antigo: `latest`)"
+            ],
+            [
+              "`digest`",
+              "Digest atual de uma tag mutável (ex.: `stable`)"
+            ],
+            [
+              "`alphabetical`",
+              "Última tag em ordem lexicográfica (tags de data)"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "Pondere antes de adotar",
+          "text": "Para produção, muitas equipes preferem que o CI abra um **PR** com a nova tag (como no fluxo de promoção do tópico de GitOps): há revisão, e o histórico mostra quem promoveu. Use o Image Updater para dev/staging, onde automação sem aprovação é aceitável."
+        },
+        {
+          "type": "h",
+          "text": "Notifications"
+        },
+        {
+          "type": "p",
+          "text": "Embutido no Argo CD desde a 2.3 (controller `argocd-notifications-controller`). Quatro conceitos: **service** (para onde enviar), **template** (a mensagem), **trigger** (condição em `when`, avaliada sobre o Application) e **subscription** (annotation que liga app + trigger + destino)."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: argocd-notifications-cm\ndata:\n  service.slack: |\n    token: $slack-token\n  template.app-deployed: |\n    message: |\n      {{.app.metadata.name}} sincronizado em\n      {{.app.status.sync.revision | trunc 7}}\n  trigger.on-deployed: |\n    - when: app.status.operationState.phase in ['Succeeded']\n        and app.status.health.status == 'Healthy'\n      oncePer: app.status.sync.revision\n      send: [app-deployed]\n  service.webhook.ci: |\n    url: https://ci.exemplo.com/hooks/argocd",
+          "file": "argocd-notifications-cm.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kubectl -n argocd annotate application api \\\n  notifications.argoproj.io/subscribe.on-deployed.slack=deploys\nkubectl -n argocd annotate application api \\\n  notifications.argoproj.io/subscribe.on-deployed.ci=\"\""
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "title": "oncePer",
+          "text": "Sem `oncePer`, o trigger dispara a cada avaliação em que a condição é verdadeira. Com `oncePer: app.status.sync.revision` você recebe uma notificação por revisão. Para controle de `sync-failed` e `health-degraded` há triggers prontos no catálogo (`argocd-notifications-catalog`)."
+        }
+      ]
+    },
+    {
+      "id": "rollouts",
+      "title": "Argo Rollouts: canary e blue-green",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O Deployment do Kubernetes só sabe fazer `RollingUpdate`. **Argo Rollouts** é um projeto irmão (CRD `Rollout` + controller) que troca o Deployment por estratégias progressivas: canary com pesos e análise de métricas, ou blue-green com preview. O Argo CD já traz o health check do `Rollout`: uma pausa aparece como `Suspended`, um abort como `Degraded`."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: Rollout\nmetadata:\n  name: api\nspec:\n  replicas: 5\n  selector: { matchLabels: { app: api } }\n  template:\n    metadata: { labels: { app: api } }\n    spec:\n      containers:\n        - name: api\n          image: ghcr.io/exemplo/api:1.4.2\n  strategy:\n    canary:\n      canaryService: api-canary\n      stableService: api-stable\n      trafficRouting:\n        nginx: { stableIngress: api }\n      steps:\n        - setWeight: 10\n        - pause: { duration: 2m }\n        - analysis:\n            templates: [{ templateName: erro-5xx }]\n        - setWeight: 50\n        - pause: { duration: 5m }",
+          "file": "rollout.yaml"
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Peso do canary ao longo do rollout",
+          "xLabel": "tempo (min)",
+          "yLabel": "% TRÁFEGO",
+          "yMax": 100,
+          "series": [
+            {
+              "name": "Canary",
+              "tone": "accent",
+              "points": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1,
+                  10
+                ],
+                [
+                  3,
+                  10
+                ],
+                [
+                  3.5,
+                  50
+                ],
+                [
+                  8.5,
+                  50
+                ],
+                [
+                  9,
+                  100
+                ],
+                [
+                  12,
+                  100
+                ]
+              ]
+            },
+            {
+              "name": "Stable",
+              "tone": "muted",
+              "dashed": true,
+              "points": [
+                [
+                  0,
+                  100
+                ],
+                [
+                  1,
+                  90
+                ],
+                [
+                  3,
+                  90
+                ],
+                [
+                  3.5,
+                  50
+                ],
+                [
+                  8.5,
+                  50
+                ],
+                [
+                  9,
+                  0
+                ],
+                [
+                  12,
+                  0
+                ]
+              ]
+            }
+          ],
+          "caption": "Ilustrativo, conforme os steps do exemplo: 10% por 2 min, análise, 50% por 5 min e promoção total. Se a análise falhar, o peso do canary volta a 0 automaticamente."
+        },
+        {
+          "type": "p",
+          "text": "A **AnalysisTemplate** define as métricas e os critérios de sucesso. Em cada passo `analysis` o controller consulta o provedor (Prometheus, Datadog, Kayenta, job, web) e aborta o rollout se o limite for violado."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: AnalysisTemplate\nmetadata:\n  name: erro-5xx\nspec:\n  args:\n    - name: service\n      value: api-canary\n  metrics:\n    - name: taxa-5xx\n      interval: 30s\n      count: 5\n      failureLimit: 1\n      successCondition: result[0] < 0.01\n      provider:\n        prometheus:\n          address: http://prometheus.monitoring:9090\n          query: |\n            sum(rate(http_requests_total{service=\"{{args.service}}\",code=~\"5..\"}[1m]))\n            / sum(rate(http_requests_total{service=\"{{args.service}}\"}[1m]))",
+          "file": "analysis-template.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "strategy:\n  blueGreen:\n    activeService: api-active\n    previewService: api-preview\n    autoPromotionEnabled: false\n    prePromotionAnalysis:\n      templates: [{ templateName: erro-5xx }]\n    scaleDownDelaySeconds: 300",
+          "file": "blue-green (trecho)"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Canary",
+            "Blue-green"
+          ],
+          "rows": [
+            [
+              "Tráfego",
+              "Gradual por pesos",
+              "Troca total do Service"
+            ],
+            [
+              "Custo",
+              "Réplicas extras proporcionais",
+              "Dobra a capacidade durante o rollout"
+            ],
+            [
+              "Exposição de falha",
+              "Só a fatia do canary",
+              "Zero em produção até promover (preview)"
+            ],
+            [
+              "Requer",
+              "Ingress/mesh/Gateway API para pesos exatos",
+              "Dois Services"
+            ],
+            [
+              "Reversão",
+              "Abort volta o peso a 0",
+              "Voltar o `activeService`"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "Convivência com sync automático",
+          "text": "Um `Rollout` abortado fica `Degraded` e o Argo CD não corrige: o estado é intencional. Repare que `selfHeal` reverte mudanças manuais no spec (como `kubectl argo rollouts set image`); a promoção correta é commitar a nova imagem no Git. Comandos como `promote` e `abort` mexem em status, não conflitam."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "title": "Gateway API",
+          "text": "Sem Ingress NGINX ou Istio? Rollouts suporta roteamento via **Gateway API** por plugin de traffic router, que é o caminho para clusters novos."
+        }
+      ]
+    },
+    {
+      "id": "segredos",
+      "title": "Segredos sem vazar",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O tópico de GitOps explica por que segredo em texto puro não vai ao Git. Aqui o foco é a **integração**: onde cada ferramenta decifra e qual componente passa a conhecer o segredo."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Abordagem",
+            "Quem decifra",
+            "Observação"
+          ],
+          "rows": [
+            [
+              "Sealed Secrets",
+              "Controller no cluster alvo",
+              "Git guarda `SealedSecret` (cifra assimétrica); a chave privada é do cluster"
+            ],
+            [
+              "External Secrets Operator",
+              "Operador no cluster, lê do cofre",
+              "Git guarda só referência; o valor nunca passa pelo Argo CD"
+            ],
+            [
+              "SOPS (KSOPS / helm-secrets)",
+              "Plugin no repo-server ou sidecar",
+              "Cifrado no Git; chave (KMS/age) precisa estar no repo-server"
+            ],
+            [
+              "argocd-vault-plugin",
+              "Plugin no repo-server",
+              "Segredo renderizado em texto dentro do Argo CD"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: external-secrets.io/v1\nkind: ExternalSecret\nmetadata:\n  name: db\n  namespace: pagamentos\nspec:\n  refreshInterval: 1h\n  secretStoreRef:\n    kind: ClusterSecretStore\n    name: vault\n  target:\n    name: db-credentials\n  data:\n    - secretKey: password\n      remoteRef:\n        key: pagamentos/db\n        property: password",
+          "file": "externalsecret.yaml"
+        },
+        {
+          "type": "p",
+          "text": "Com ESO o Git contém apenas \"qual chave do cofre, em que Secret\". O Argo CD sincroniza o `ExternalSecret`; o operador cria o `Secret`. O `Secret` resultante não é rastreado pelo Argo CD, então não aparece como `OutOfSync`."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: viaduct.ai/v1\nkind: ksops\nmetadata:\n  name: segredos\nfiles:\n  - ./db.enc.yaml",
+          "file": "secret-generator.yaml"
+        },
+        {
+          "type": "p",
+          "text": "KSOPS é um plugin de Kustomize: requer `--enable-alpha-plugins --enable-exec` em `kustomize.buildOptions` e o binário + a chave (age ou KMS) no repo-server. É um bom custo-benefício para equipes pequenas, ao preço de a chave morar no componente mais exposto."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "title": "Por que evitar renderizar segredos no repo-server",
+          "text": "Plugins como argocd-vault-plugin buscam o valor no cofre durante o `generate`. Assim: (1) o repo-server precisa de credenciais do cofre com acesso a **todos** os caminhos que qualquer Application possa referenciar; (2) o manifest com o segredo em texto puro é guardado no cache (Redis) e fica acessível a quem alcançar o Redis; (3) `argocd app manifests` e a visão de diff podem expor o valor a quem tem `get` no app; (4) um repo malicioso com um placeholder qualquer lê segredos de outros times. A documentação do Argo CD recomenda operadores que injetam o segredo no cluster, fora do ciclo de render."
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "title": "Criptografia em repouso",
+          "text": "Qualquer que seja a escolha, ative a criptografia de Secrets no etcd (KMS provider) e restrinja `get secrets` via RBAC do Kubernetes: o segredo existirá no cluster de qualquer forma."
+        }
+      ]
+    },
+    {
+      "id": "dr-diag",
+      "title": "Recuperação e diagnóstico",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "Backup e restore"
+        },
+        {
+          "type": "p",
+          "text": "Se tudo estiver declarativo, o Git **é** o backup: recriar um cluster de gestão é instalar o Argo CD e aplicar a raiz. O que não está no Git (Secrets de repo e de cluster criados pela CLI, tokens, contas locais) pode ser exportado."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "argocd admin export -n argocd > argocd-backup.yaml\n# em outro cluster, após instalar o Argo CD:\nargocd admin import -n argocd - < argocd-backup.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "title": "O backup contém segredos",
+          "text": "O export inclui credenciais de repositórios e clusters. Cifre o arquivo (age/GPG/cofre) e não o suba para o Git. Teste o restore periodicamente: backup sem teste é esperança."
+        },
+        {
+          "type": "h",
+          "text": "Argo CD gerencia o Argo CD"
+        },
+        {
+          "type": "p",
+          "text": "A instalação vira um `Application` apontando para um Kustomize que referencia o manifest oficial por tag. Atualizar o Argo CD passa a ser um PR. O bootstrap tem um passo manual, porque algo precisa existir para começar."
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Instalar",
+              "text": "`kubectl apply -n argocd --server-side -f` do manifest da versão, ou `kubectl apply -k` do seu overlay."
+            },
+            {
+              "title": "Aplicar a raiz",
+              "text": "`kubectl apply -f root.yaml` com o Application que aponta para `bootstrap/argocd`."
+            },
+            {
+              "title": "Assumir",
+              "text": "O Argo CD passa a reconciliar a si mesmo. Mudanças futuras são só commits."
+            },
+            {
+              "title": "Proteger",
+              "text": "Marque CRDs com `Delete=false`/`Prune=false` e desabilite `admin`."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: argocd\n  namespace: argocd\nspec:\n  project: platform\n  source:\n    repoURL: https://git.exemplo.com/plataforma/config.git\n    targetRevision: main\n    path: bootstrap/argocd\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: argocd\n  syncPolicy:\n    automated: { selfHeal: true }\n    syncOptions: [ServerSideApply=true]",
+          "file": "argocd-self.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "title": "Nunca prune os CRDs do Argo CD",
+          "text": "Se o sync com `prune` remover o CRD `Application`, o Kubernetes apaga **todas** as Applications e o Argo CD perde o que gerencia. Anote os CRDs com `argocd.argoproj.io/sync-options: Prune=false,Delete=false` e mantenha `automated.prune` desligado neste Application."
+        },
+        {
+          "type": "h",
+          "text": "Diagnóstico"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Sintoma",
+            "Causa provável",
+            "Correção"
+          ],
+          "rows": [
+            [
+              "App preso em `Progressing`",
+              "Deployment sem réplicas prontas, PVC `Pending`, Ingress sem IP de LB",
+              "`kubectl describe` do recurso; Ingress sem LB: health customizado ou `ignoreDifferences` do status"
+            ],
+            [
+              "`OutOfSync` volta logo após sync",
+              "Webhook mutante, HPA mexendo em `replicas`, campos com default do servidor",
+              "`ignoreDifferences` + `RespectIgnoreDifferences=true`; `ServerSideDiff=true`; remover `replicas` do manifest com HPA"
+            ],
+            [
+              "`ComparisonError`",
+              "Chart/Kustomize inválido, repo inacessível, plugin falhou",
+              "`argocd app get -o yaml` e logs do repo-server; `helm template`/`kustomize build` local"
+            ],
+            [
+              "Repo-server `OOMKilled` ou timeout",
+              "Monorepo/chart gigante, render concorrente demais",
+              "Subir memória, `reposerver.parallelism.limit`, `manifest-generate-paths`, subir timeout"
+            ],
+            [
+              "Sync trava em hook",
+              "Job de PreSync não termina ou não baixa a imagem",
+              "`argocd app terminate-op`; corrigir Job; definir `activeDeadlineSeconds`"
+            ],
+            [
+              "Application não é apagado",
+              "Finalizer `resources-finalizer.argocd.argoproj.io` esperando recursos",
+              "Ver recursos presos; como último recurso, remover o finalizer com `kubectl patch`"
+            ],
+            [
+              "`Unknown` no health",
+              "Falta health check para o CRD",
+              "Health customizado em Lua em `resource.customizations.health.<grupo_Kind>`"
+            ],
+            [
+              "Mudança do Git não chega",
+              "Cache/refresh, webhook mal configurado",
+              "`argocd app get --hard-refresh`; verificar o secret do webhook"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "argocd app get api --hard-refresh\nargocd app diff api\nargocd app terminate-op api\nkubectl -n argocd logs deploy/argocd-repo-server --tail=100\nkubectl -n argocd patch app api --type merge \\\n  -p '{\"metadata\":{\"finalizers\":null}}'"
+        },
+        {
+          "type": "p",
+          "text": "O finalizer `resources-finalizer.argocd.argoproj.io` faz o Argo CD apagar os recursos gerenciados antes de liberar o Application (cascade em primeiro plano); a variante `.../background` faz o mesmo sem bloquear. Sem finalizer, apagar o Application deixa os recursos órfãos no cluster."
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Consequência",
+            "Como evitar"
+          ],
+          "rows": [
+            [
+              "ApplicationSet sem `missingkey=error`",
+              "Application com path quebrado, sem aviso",
+              "`goTemplate: true` e `missingkey=error`"
+            ],
+            [
+              "Gerador vazio + finalizer no template",
+              "Cargas de produção apagadas",
+              "`preserveResourcesOnDeletion` e `create-update`"
+            ],
+            [
+              "Waves esperando Application filho",
+              "Raiz presa em `Progressing` por health do filho",
+              "Entender que o health do filho conta; corrigir o filho"
+            ],
+            [
+              "Hook sem `activeDeadlineSeconds`",
+              "Sync pendurado para sempre",
+              "Limitar Jobs de hook"
+            ],
+            [
+              "Prune do CRD do próprio Argo CD",
+              "Todas as Applications somem",
+              "`Prune=false,Delete=false` nos CRDs"
+            ],
+            [
+              "Token de projeto sem expiração",
+              "Credencial eterna vazada",
+              "`--expires-in` e rotação"
+            ],
+            [
+              "Image Updater `argocd` em produção",
+              "Estado fora do Git",
+              "Write-back `git` ou PR do CI"
+            ],
+            [
+              "Segredo renderizado no repo-server",
+              "Texto puro no cache e na UI",
+              "ESO ou Sealed Secrets"
+            ],
+            [
+              "`selfHeal` com HPA gerenciando `replicas`",
+              "Briga permanente entre controladores",
+              "Remover `replicas` do manifest ou ignorar o campo"
+            ],
+            [
+              "Tudo em um Argo CD sem sharding",
+              "Reconciliação lenta com milhares de apps",
+              "Réplicas do controller, webhooks, processors"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "App-of-apps",
+              "def": "Application raiz cujo conteúdo são outros Applications."
+            },
+            {
+              "term": "ApplicationSet",
+              "def": "CRD e controller que geram Applications a partir de geradores e um molde."
+            },
+            {
+              "term": "Gerador",
+              "def": "Fonte de parâmetros do ApplicationSet (List, Cluster, Git, Matrix...)."
+            },
+            {
+              "term": "Hook",
+              "def": "Recurso (geralmente Job) executado numa fase do sync: PreSync, PostSync, SyncFail."
+            },
+            {
+              "term": "Sync wave",
+              "def": "Inteiro que ordena recursos dentro de uma fase; o Argo CD espera Healthy entre waves."
+            },
+            {
+              "term": "CMP",
+              "def": "Config Management Plugin: sidecar que gera manifests com ferramenta própria."
+            },
+            {
+              "term": "Shard",
+              "def": "Réplica do application-controller responsável por um subconjunto de clusters."
+            },
+            {
+              "term": "Project role",
+              "def": "Role definida no AppProject, com tokens JWT próprios."
+            },
+            {
+              "term": "Dex",
+              "def": "Proxy OIDC embutido para integrar provedores que não falam OIDC nativamente."
+            },
+            {
+              "term": "Write-back",
+              "def": "Persistência da nova tag de imagem: no Git ou como override do Application."
+            },
+            {
+              "term": "Rollout",
+              "def": "CRD do Argo Rollouts que substitui o Deployment por canary/blue-green."
+            },
+            {
+              "term": "AnalysisTemplate",
+              "def": "Definição de métricas e critérios que decidem promover ou abortar um rollout."
+            },
+            {
+              "term": "Finalizer",
+              "def": "Marca que obriga o Argo CD a limpar recursos antes de remover o Application."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Fim da série Argo CD. A melhor forma de fixar é montar um laboratório (kind + dois clusters) com um ApplicationSet de Matrix, um hook de migração e um Rollout com análise."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Série Go:** quando as abstrações prontas não bastam, escreva seus próprios controllers e operadores (a mesma lógica de reconciliação do ApplicationSet e do Rollouts).",
+            "**Kubernetes 3:** volte para segurança do cluster: RBAC, Pod Security e políticas, que sustentam o que foi visto aqui (ServiceAccount do `argocd-manager`, segredos no etcd).",
+            "Releia o tópico de **GitOps** para o desenho do repositório e a promoção entre ambientes, agora com os padrões desta parte."
+          ]
+        }
+      ]
+    }
+  ]
+}

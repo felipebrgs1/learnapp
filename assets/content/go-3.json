@@ -1,0 +1,1887 @@
+{
+  "id": "go-3",
+  "title": "Go 3 — Go em produção",
+  "summary": "Layout, módulos, testes, serviços HTTP, observabilidade, desempenho, GC, containers e controllers Kubernetes para levar Go à produção.",
+  "category": "Linguagens",
+  "level": "Avançado",
+  "minutes": 55,
+  "updated": "out 2026",
+  "tags": [
+    "go",
+    "golang",
+    "produção",
+    "testes",
+    "net/http",
+    "slog",
+    "pprof",
+    "gc",
+    "gomemlimit",
+    "docker",
+    "client-go",
+    "kubebuilder",
+    "generics",
+    "módulos"
+  ],
+  "series": "Go",
+  "part": 3,
+  "sections": [
+    {
+      "id": "visao-geral",
+      "title": "Visão geral",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Dominar a linguagem é metade do caminho. A outra metade é o que acontece **depois do `go build`**: como organizar o repositório, versionar dependências, testar sem sofrer, expor um serviço HTTP que sobreviva à internet, medir o que ele faz, entender o coletor de lixo e empacotar tudo numa imagem pequena que rode em Kubernetes."
+        },
+        {
+          "type": "p",
+          "text": "Esta parte assume as duas anteriores: tipos, interfaces, erros e generics básicos (parte 1) e goroutines, channels, `context` e desligamento gracioso (parte 2). Aqui o foco é **engenharia**: decisões que parecem detalhes e viram incidentes às 3h da manhã."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Projeto e módulos**: layout mínimo, `internal/`, workspaces, `govulncheck`, ferramentas versionadas no `go.mod`.",
+            "**Generics a fundo**: type sets, constraints, estruturas de dados genéricas e quando *não* usar.",
+            "**Testes**: tabelas, subtestes, `b.Loop`, fuzzing, `httptest`, golden files e `testing/synctest`.",
+            "**Serviço HTTP**: `ServeMux` com padrões, middlewares, timeouts, JSON e shutdown.",
+            "**Operação**: `slog`, configuração, métricas, pprof, GC, `GOMEMLIMIT`, imagens e controllers Kubernetes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Os exemplos usam `go 1.25` no `go.mod` e funcionam em versões posteriores. Recursos novos trazem a versão em que surgiram; confirme nas notas de release da sua toolchain.",
+          "title": "Versões"
+        }
+      ]
+    },
+    {
+      "id": "layout",
+      "title": "Layout do projeto",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O guia oficial (go.dev, *Organizing a Go module*) é deliberadamente curto: **comece simples e só crie estrutura quando houver dor**. Um módulo é uma árvore com um `go.mod` na raiz; pacotes são diretórios. Não existe layout obrigatório, e o repositório `golang-standards/project-layout` **não é** um padrão da equipe Go, apesar do nome."
+        },
+        {
+          "type": "h",
+          "text": "Comece plano"
+        },
+        {
+          "type": "p",
+          "text": "Um serviço pequeno cabe em um único pacote `main`. Separar arquivos por assunto dentro do mesmo pacote custa zero e evita ciclos de importação, o problema que mais machuca quem fatia cedo demais."
+        },
+        {
+          "type": "code",
+          "lang": "tree",
+          "code": "meuservico/\n  go.mod\n  main.go          # package main: flags, wiring, run()\n  server.go        # rotas e handlers\n  store.go         # acesso a dados\n  store_test.go"
+        },
+        {
+          "type": "h",
+          "text": "Quando crescer"
+        },
+        {
+          "type": "p",
+          "text": "Dois sinais justificam estrutura: **mais de um binário** (use `cmd/<nome>/main.go`) e **código que não deve ser importado por terceiros** (use `internal/`). O compilador impõe `internal/`: só o módulo pai consegue importar esses pacotes, então você refatora sem quebrar ninguém."
+        },
+        {
+          "type": "code",
+          "lang": "tree",
+          "code": "meuservico/\n  go.mod\n  cmd/\n    api/main.go        # binário 1: só wiring\n    worker/main.go     # binário 2\n  internal/\n    config/            # leitura de env/flags\n    httpapi/           # handlers, middlewares\n    billing/           # domínio: regras + interface Store\n    postgres/          # implementação de billing.Store\n  testdata/\n  Dockerfile"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Diretório",
+            "Uso",
+            "Observação"
+          ],
+          "rows": [
+            [
+              "`cmd/`",
+              "Um subdiretório por executável",
+              "Mantenha `main` fino: monta dependências e chama `run()`."
+            ],
+            [
+              "`internal/`",
+              "Código privado do módulo",
+              "Imposto pelo compilador; padrão para quase tudo em aplicações."
+            ],
+            [
+              "`pkg/`",
+              "Convenção comunitária para código \"público\"",
+              "Não é recomendada pela doc oficial; em aplicações costuma ser ruído. Em bibliotecas, coloque pacotes públicos na raiz."
+            ],
+            [
+              "`testdata/`",
+              "Fixtures e golden files",
+              "Ignorado pelo `go build` e `./...`."
+            ],
+            [
+              "`vendor/`",
+              "Cópia das dependências",
+              "Opcional; use com `go mod vendor` e `-mod=vendor` se precisar de build hermético."
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Organize por responsabilidade, não por camada"
+        },
+        {
+          "type": "p",
+          "text": "Pastas como `models/`, `controllers/` e `services/` empurram tudo para pacotes enormes que se importam em círculo. Prefira pacotes coesos de domínio (`billing`, `auth`) com nomes curtos e sem `utils` ou `common`. O pacote que **usa** uma dependência declara a interface mínima de que precisa; quem implementa não precisa saber disso."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "// cmd/api/main.go — main fino, testável\nfunc main() {\n\tctx, stop := signal.NotifyContext(context.Background(),\n\t\tos.Interrupt, syscall.SIGTERM)\n\tdefer stop()\n\tif err := run(ctx, os.Args[1:], os.Stdout); err != nil {\n\t\tfmt.Fprintln(os.Stderr, \"erro:\", err)\n\t\tos.Exit(1)\n\t}\n}\n\nfunc run(ctx context.Context, args []string, out io.Writer) error {\n\tcfg, err := config.Load(args)\n\tif err != nil {\n\t\treturn err\n\t}\n\tstore := postgres.New(cfg.DSN)\n\treturn httpapi.Serve(ctx, cfg, billing.NewService(store), out)\n}",
+          "file": "cmd/api/main.go"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Injeção de dependência em Go é **construtor com argumentos**. Sem container, sem reflexão, sem `init()` com efeitos colaterais. O grafo de dependências fica visível em `run()` e os testes passam fakes direto.",
+          "title": "Wiring manual"
+        }
+      ]
+    },
+    {
+      "id": "dependencias",
+      "title": "Módulos e dependências",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O `go.mod` declara o módulo, a versão mínima da linguagem e os requisitos. O `go.sum` guarda hashes criptográficos de cada módulo, verificados contra o banco público `sum.golang.org`. A resolução usa **MVS** (Minimal Version Selection): entre todas as exigências do grafo, escolhe-se a **menor** versão que satisfaz todas. Resultado: builds reproduzíveis sem arquivo de lock separado e sem upgrades surpresa."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "module example.com/meuservico\n\ngo 1.25.0\n\ntoolchain go1.25.3\n\nrequire (\n\tgithub.com/prometheus/client_golang v1.23.2\n\tgolang.org/x/sync v0.17.0\n)\n\ntool golang.org/x/vuln/cmd/govulncheck",
+          "file": "go.mod"
+        },
+        {
+          "type": "p",
+          "text": "Desde o Go 1.21 a linha `go` é um **requisito**: se o módulo diz `go 1.25.0`, uma toolchain mais antiga baixa a correta automaticamente (`GOTOOLCHAIN=auto`) em vez de compilar com semântica errada. A linha `toolchain` apenas sugere qual usar."
+        },
+        {
+          "type": "h",
+          "text": "Comandos do dia a dia"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go get github.com/google/uuid@latest   # adiciona ou atualiza\ngo get github.com/google/uuid@v1.6.0   # versão exata\ngo get -u ./...                        # atualiza deps diretas e indiretas\ngo mod tidy                            # remove não usadas, completa faltantes\ngo list -m -u all                      # mostra upgrades disponíveis\ngo mod why -m golang.org/x/text        # por que esta dep existe?\ngo mod graph | head                    # grafo de requisitos\ngo mod verify                          # confere hashes em cache"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Rode `go mod tidy` antes de cada commit e falhe o CI se `git diff --exit-code go.mod go.sum` mostrar mudança. Isso pega dependências esquecidas e `go.sum` incompleto.",
+          "title": "Higiene"
+        },
+        {
+          "type": "h",
+          "text": "Ferramentas versionadas: a diretiva tool"
+        },
+        {
+          "type": "p",
+          "text": "Antes do Go 1.24, ferramentas de desenvolvimento (linters, geradores) eram fixadas com um arquivo `tools.go` cheio de imports em branco. Agora existe a diretiva `tool` no `go.mod`: a versão fica registrada junto das demais dependências e todo mundo roda exatamente a mesma."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go get -tool golang.org/x/vuln/cmd/govulncheck@latest\ngo get -tool golang.org/x/perf/cmd/benchstat@latest\n\ngo tool govulncheck ./...      # roda a versão do go.mod\ngo tool                        # lista as ferramentas disponíveis\ngo get tool                    # atualiza todas"
+        },
+        {
+          "type": "h",
+          "text": "replace e workspaces"
+        },
+        {
+          "type": "p",
+          "text": "`replace` redireciona um módulo para outro caminho ou versão, útil para testar um fork ou uma correção local. Ele só vale no **módulo principal**: dependentes do seu módulo ignoram os `replace` dele. Para desenvolver vários módulos juntos sem editar `go.mod`, use **workspaces**."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# replace pontual (entra no go.mod; cuidado ao commitar)\ngo mod edit -replace example.com/lib=../lib\n\n# workspace: go.work não altera nenhum go.mod\ngo work init ./api ./lib\ngo work use ./tools\ngo build ./...          # api enxerga ../lib sem replace"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Commitar `go.work` ou um `replace` com caminho relativo quebra o build de quem clona o repositório sem a pasta vizinha. Em repositórios de biblioteca, deixe `go.work` no `.gitignore`; em monorepos de aplicação é comum versioná-lo.",
+          "title": "Não vaze o ambiente local"
+        },
+        {
+          "type": "h",
+          "text": "Vulnerabilidades"
+        },
+        {
+          "type": "p",
+          "text": "`govulncheck` consulta o banco de vulnerabilidades do Go e faz análise de **alcançabilidade**: só reporta uma falha se seu código realmente chama a função afetada, o que derruba o ruído de scanners que olham apenas o `go.mod`. Também analisa binários prontos."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go tool govulncheck ./...                 # código-fonte\ngo tool govulncheck -mode=binary ./app    # binário já compilado"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Rode no CI a cada PR **e** em agendamento: vulnerabilidades novas aparecem sem que seu código mude.",
+            "Corrigir costuma ser `go get pacote@versao-corrigida` e `go mod tidy`; vulnerabilidades na biblioteca padrão se resolvem atualizando a toolchain.",
+            "Configure `GOPRIVATE=git.empresa.com/*` para módulos privados não passarem por proxy e sumdb públicos."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "generics",
+      "title": "Generics a fundo",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A parte 1 apresentou a sintaxe. Aqui o modelo mental: um parâmetro de tipo é restringido por uma **constraint**, que é uma interface descrevendo um **type set**, o conjunto de tipos que a satisfazem. O compilador só permite no corpo da função as operações válidas para **todos** os tipos do conjunto."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Constraint",
+            "Type set",
+            "Permite"
+          ],
+          "rows": [
+            [
+              "`any`",
+              "todos os tipos",
+              "atribuir, passar adiante; nada de `==` ou `+`"
+            ],
+            [
+              "`comparable`",
+              "tipos comparáveis com `==`",
+              "`==`, `!=`, chave de `map`"
+            ],
+            [
+              "`cmp.Ordered`",
+              "inteiros, floats e strings (e derivados via `~`)",
+              "`<`, `<=`, `>`, `>=`"
+            ],
+            [
+              "`~int | ~float64`",
+              "tipos cujo subjacente é `int` ou `float64`",
+              "`+`, `-`, `*`, conversões"
+            ],
+            [
+              "`fmt.Stringer`",
+              "tipos com método `String()`",
+              "chamar `.String()`"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O til em `~int` significa \"qualquer tipo cujo tipo subjacente é `int`\". Sem ele, `type Celsius float64` não satisfaria uma constraint `float64`. Constraints podem misturar união de tipos e métodos, por exemplo `interface{ ~int; String() string }`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Number interface {\n\t~int | ~int64 | ~float64\n}\n\nfunc Sum[T Number](xs ...T) T {\n\tvar total T // valor zero de T\n\tfor _, x := range xs {\n\t\ttotal += x\n\t}\n\treturn total\n}\n\ntype Celsius float64\n\nfunc main() {\n\tfmt.Println(Sum(1, 2, 3))             // T = int (inferido)\n\tfmt.Println(Sum(Celsius(20), 1.5))    // T = Celsius\n}"
+        },
+        {
+          "type": "h",
+          "text": "Inferência"
+        },
+        {
+          "type": "p",
+          "text": "O compilador infere `T` a partir dos argumentos e, quando necessário, das constraints. Ele **não** infere a partir do tipo de retorno: `Zero[int]()` exige o argumento explícito. Parâmetros de tipo podem ser parcialmente informados da esquerda para a direita: `Map[int](xs, f)` fixa `T` e infere `U`."
+        },
+        {
+          "type": "h",
+          "text": "Estruturas de dados genéricas"
+        },
+        {
+          "type": "p",
+          "text": "O caso de uso mais legítimo: contêineres que não dependem do comportamento do elemento. Métodos de um tipo genérico **repetem** os parâmetros do receptor, mas não podem declarar novos: Go não tem métodos genéricos."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Stack[T any] struct{ items []T }\n\nfunc (s *Stack[T]) Push(v T) { s.items = append(s.items, v) }\n\nfunc (s *Stack[T]) Pop() (T, bool) {\n\tvar zero T\n\tif len(s.items) == 0 {\n\t\treturn zero, false\n\t}\n\tv := s.items[len(s.items)-1]\n\ts.items = s.items[:len(s.items)-1]\n\treturn v, true\n}\n\n// iterador (Go 1.23): range sobre função\nfunc (s *Stack[T]) All() iter.Seq[T] {\n\treturn func(yield func(T) bool) {\n\t\tfor i := len(s.items) - 1; i >= 0; i-- {\n\t\t\tif !yield(s.items[i]) {\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t}\n}",
+          "file": "stack.go"
+        },
+        {
+          "type": "p",
+          "text": "O padrão `iter.Seq[T]` permite `for v := range s.All()`. Combinado com os pacotes `slices`, `maps` e `cmp`, cobre a maior parte do que antes exigia código repetido."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "keys := slices.Sorted(maps.Keys(cfg))        // chaves ordenadas\ni, found := slices.BinarySearch(keys, \"api\")\nslices.SortFunc(users, func(a, b User) int {\n\treturn cmp.Compare(a.Age, b.Age)\n})\nidx := slices.IndexFunc(users, func(u User) bool { return u.Admin })"
+        },
+        {
+          "type": "h",
+          "text": "Aliases genéricos (Go 1.24)"
+        },
+        {
+          "type": "p",
+          "text": "Desde o Go 1.24, um alias pode ter parâmetros de tipo. Serve para dar nome expressivo a um tipo composto e, principalmente, para **migrar tipos entre pacotes** sem quebrar quem importa."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Set[T comparable] = map[T]struct{}\n\ns := Set[string]{\"a\": {}}\n_, ok := s[\"a\"]\n\n// migração: o tipo mudou de pacote, o nome antigo continua\ntype Vec[T any] = collections.Vec[T]"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Um alias é o **mesmo tipo** com outro nome, não um tipo novo. Por isso você não define métodos em `Set[T]`; para isso use `type Set[T comparable] map[T]struct{}` (sem `=`).",
+          "title": "Alias não é defined type"
+        },
+        {
+          "type": "h",
+          "text": "Como é compilado"
+        },
+        {
+          "type": "p",
+          "text": "O compilador usa *GC shape stenciling*: gera uma instância por \"forma\" de memória (todos os ponteiros compartilham uma) e passa um **dicionário** com informações do tipo real. Consequência prática: operar sobre `T` pode custar uma indireção a mais que o código concreto, em geral pouco. Se o laço é quente, meça com benchmark antes de assumir."
+        },
+        {
+          "type": "h",
+          "text": "Quando não usar"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Situação",
+            "Prefira",
+            "Por quê"
+          ],
+          "rows": [
+            [
+              "Comportamento varia por tipo",
+              "Interface com método",
+              "O tipo decide como se comporta; generics só repetem o corpo."
+            ],
+            [
+              "Só um tipo concreto hoje",
+              "Tipo concreto",
+              "Abstraia na segunda ocorrência real, não na primeira imaginada."
+            ],
+            [
+              "Precisa de método genérico",
+              "Função genérica livre",
+              "Métodos não aceitam novos parâmetros de tipo."
+            ],
+            [
+              "Chamar `fmt`/`json` com `any`",
+              "`any` simples",
+              "Reflexão já opera em tempo de execução."
+            ],
+            [
+              "Estrutura de dados, algoritmo sobre slices/maps",
+              "Generics",
+              "O caso para o qual foram criados."
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Generics usados para imitar hierarquias de classes ou \"repositórios genéricos\" tendem a produzir assinaturas ilegíveis. Se o leitor precisa decifrar três parâmetros de tipo para entender uma função, provavelmente uma interface pequena resolve melhor.",
+          "title": "Evite sobre-engenharia"
+        }
+      ]
+    },
+    {
+      "id": "testes",
+      "title": "Testes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O pacote `testing` é pequeno de propósito: sem asserts embutidos, sem DSL. Um teste é uma função `TestXxx(t *testing.T)` em arquivo `_test.go`, e `go test` compila, roda e cacheia o resultado (use `-count=1` para ignorar o cache). A força vem de convenções: tabelas, subtestes e ferramentas ao redor."
+        },
+        {
+          "type": "h",
+          "text": "Table-driven com subtestes"
+        },
+        {
+          "type": "p",
+          "text": "Cada caso vira um `t.Run`, que cria um subteste com nome próprio: dá para filtrar (`-run 'TestParse/vazio'`), paralelizar e ver exatamente qual caso falhou. Desde o Go 1.22 a variável do `for` é nova a cada iteração, então **não precisa mais** do `tt := tt` antes de `t.Parallel()`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func TestParseSize(t *testing.T) {\n\ttests := []struct {\n\t\tname    string\n\t\tin      string\n\t\twant    int64\n\t\twantErr bool\n\t}{\n\t\t{\"bytes\", \"10\", 10, false},\n\t\t{\"kilobytes\", \"2KiB\", 2048, false},\n\t\t{\"vazio\", \"\", 0, true},\n\t\t{\"unidade ruim\", \"5XB\", 0, true},\n\t}\n\tfor _, tt := range tests {\n\t\tt.Run(tt.name, func(t *testing.T) {\n\t\t\tt.Parallel()\n\t\t\tgot, err := ParseSize(tt.in)\n\t\t\tif (err != nil) != tt.wantErr {\n\t\t\t\tt.Fatalf(\"erro = %v, wantErr = %v\", err, tt.wantErr)\n\t\t\t}\n\t\t\tif got != tt.want {\n\t\t\t\tt.Errorf(\"ParseSize(%q) = %d; want %d\", tt.in, got, tt.want)\n\t\t\t}\n\t\t})\n\t}\n}",
+          "file": "size_test.go"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`t.Fatal` interrompe o teste; `t.Error` registra e continua. Mensagens no formato `f(entrada) = obtido; want esperado`.",
+            "`t.Helper()` em funções auxiliares faz a falha apontar para o chamador.",
+            "`t.Cleanup`, `t.TempDir()`, `t.Setenv` (incompatível com `t.Parallel`) e `t.Context()` (Go 1.24; cancelado logo antes dos cleanups) evitam código de limpeza manual.",
+            "Teste o contrato público em um pacote `foo_test` (caixa-preta); use o pacote interno só quando precisar de detalhes."
+          ]
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Flag",
+            "Efeito"
+          ],
+          "rows": [
+            [
+              "`-race`",
+              "Ativa o race detector (parte 2); use sempre no CI."
+            ],
+            [
+              "`-shuffle=on`",
+              "Embaralha a ordem; revela dependência oculta entre testes."
+            ],
+            [
+              "`-run`, `-skip`",
+              "Filtra por regex; `/` separa níveis de subteste."
+            ],
+            [
+              "`-short`",
+              "Permite pular testes lentos com `testing.Short()`."
+            ],
+            [
+              "`-count=N`",
+              "Repete N vezes (e ignora cache com 1)."
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Benchmarks com b.Loop"
+        },
+        {
+          "type": "p",
+          "text": "No Go 1.24 chegou `b.Loop()`. O formato antigo `for i := 0; i < b.N; i++` exigia `b.ResetTimer()` após o setup e permitia que o compilador eliminasse a chamada se o resultado fosse ignorado. Com `b.Loop`, o setup antes do laço e a limpeza depois **ficam fora da medição**, a função é executada uma vez por contagem e o compilador não otimiza o corpo para fora."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func BenchmarkParseSize(b *testing.B) {\n\tb.ReportAllocs()\n\tin := \"128MiB\" // setup: não conta no tempo\n\tfor b.Loop() {\n\t\tParseSize(in)\n\t}\n}",
+          "file": "size_test.go"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go test -bench=ParseSize -benchmem -count=10 -run='^$' ./..."
+        },
+        {
+          "type": "h",
+          "text": "Fuzzing"
+        },
+        {
+          "type": "p",
+          "text": "O fuzzer gera entradas guiado por cobertura. Ele brilha em parsers, codecs e qualquer função com propriedades verificáveis, como *round trip* (`decodificar(codificar(x)) == x`). Entradas que falham são salvas em `testdata/fuzz/FuzzNome/` e passam a rodar como casos de regressão em todo `go test` comum."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func FuzzQuoteRoundTrip(f *testing.F) {\n\tf.Add(\"olá\")\n\tf.Add(\"\")\n\tf.Fuzz(func(t *testing.T, s string) {\n\t\tgot, err := strconv.Unquote(strconv.Quote(s))\n\t\tif err != nil || got != s {\n\t\t\tt.Fatalf(\"round trip falhou: %q -> %q (%v)\", s, got, err)\n\t\t}\n\t})\n}"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go test -fuzz=FuzzQuoteRoundTrip -fuzztime=30s"
+        },
+        {
+          "type": "h",
+          "text": "HTTP com httptest"
+        },
+        {
+          "type": "p",
+          "text": "`httptest.NewRecorder` testa um handler sem rede: você chama `ServeHTTP` direto e inspeciona o resultado. `httptest.NewServer` sobe um servidor real em porta efêmera, ideal para testar clientes, middlewares e o roteador completo."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func TestGetItem(t *testing.T) {\n\tsrv := httptest.NewServer(newServer().routes())\n\tt.Cleanup(srv.Close)\n\n\tresp, err := http.Get(srv.URL + \"/items/42\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tdefer resp.Body.Close()\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d\", resp.StatusCode)\n\t}\n}\n\nfunc TestBadJSON(t *testing.T) {\n\trec := httptest.NewRecorder()\n\treq := httptest.NewRequest(\"POST\", \"/items\",\n\t\tstrings.NewReader(`{\"campo\":`))\n\tnewServer().routes().ServeHTTP(rec, req)\n\tif rec.Code != http.StatusBadRequest {\n\t\tt.Fatalf(\"code = %d\", rec.Code)\n\t}\n}"
+        },
+        {
+          "type": "h",
+          "text": "Golden files"
+        },
+        {
+          "type": "p",
+          "text": "Para saídas grandes (HTML, JSON, relatórios), compare com um arquivo em `testdata/` e ofereça uma flag `-update` que o reescreve. A revisão de código passa a ser o diff do arquivo."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var update = flag.Bool(\"update\", false, \"reescreve golden files\")\n\nfunc TestRender(t *testing.T) {\n\tgot := Render(sampleReport())\n\tgolden := filepath.Join(\"testdata\", t.Name()+\".golden\")\n\tif *update {\n\t\tif err := os.WriteFile(golden, got, 0o644); err != nil {\n\t\t\tt.Fatal(err)\n\t\t}\n\t}\n\twant, err := os.ReadFile(golden)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif !bytes.Equal(got, want) {\n\t\tt.Errorf(\"saída difere de %s (rode com -update)\", golden)\n\t}\n}"
+        },
+        {
+          "type": "h",
+          "text": "Cobertura"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go test -coverprofile=c.out -coverpkg=./... ./...\ngo tool cover -func=c.out | tail -1     # total\ngo tool cover -html=c.out               # abre no navegador\n\n# cobertura de binário real (testes de integração), Go 1.20+\ngo build -cover -o app-cov ./cmd/api\nGOCOVERDIR=/tmp/cov ./app-cov && go tool covdata percent -i=/tmp/cov"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Cobertura mede linhas executadas, não comportamento verificado. Use-a para achar código **sem** teste, não como meta numérica.",
+          "title": "Interpretação"
+        },
+        {
+          "type": "h",
+          "text": "Concorrência determinística: testing/synctest"
+        },
+        {
+          "type": "p",
+          "text": "Testar código com timers e goroutines costuma significar `time.Sleep` real: lento e instável. O pacote `testing/synctest`, estável no Go 1.25 (experimental no 1.24), roda o teste numa **bolha**: as goroutines criadas dentro dela usam um relógio falso, que só avança quando **todas** estão bloqueadas de forma durável (canal, `Sleep`, `WaitGroup.Wait`, `Cond.Wait`). Uma hora de espera vira microssegundos, e `synctest.Wait()` bloqueia até todas as goroutines da bolha pararem."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func TestWorkerFinishesAfterTimeout(t *testing.T) {\n\tsynctest.Test(t, func(t *testing.T) {\n\t\tvar done atomic.Bool\n\t\tvar wg sync.WaitGroup\n\t\twg.Go(func() { // sync.WaitGroup.Go: Go 1.25\n\t\t\ttime.Sleep(time.Hour)\n\t\t\tdone.Store(true)\n\t\t})\n\n\t\tsynctest.Wait() // todas bloqueadas no Sleep\n\t\tif done.Load() {\n\t\t\tt.Fatal(\"terminou cedo demais\")\n\t\t}\n\t\ttime.Sleep(time.Hour) // relógio falso avança de imediato\n\t\tsynctest.Wait()\n\t\tif !done.Load() {\n\t\t\tt.Fatal(\"deveria ter terminado\")\n\t\t}\n\t})\n}",
+          "file": "worker_test.go"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Bloqueio em **I/O real** (rede, arquivos, mutex) não conta como \"durável\", então o relógio não avança. Use `net.Pipe` ou fakes em memória dentro da bolha. A API antiga `synctest.Run` foi substituída por `synctest.Test` e removida em versões posteriores.",
+          "title": "Limites da bolha"
+        }
+      ]
+    },
+    {
+      "id": "http",
+      "title": "Serviços HTTP com net/http",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A biblioteca padrão é suficiente para a maioria dos serviços. Desde o Go 1.22 o `ServeMux` entende **método, curingas e prioridade**, o que eliminou o principal motivo para trazer um roteador de terceiros."
+        },
+        {
+          "type": "h",
+          "text": "Roteamento"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "mux := http.NewServeMux()\nmux.HandleFunc(\"GET /healthz\", health)\nmux.HandleFunc(\"GET /items/{id}\", getItem)\nmux.HandleFunc(\"POST /items\", createItem)\nmux.HandleFunc(\"GET /files/{path...}\", serveFile) // resto do caminho\nmux.HandleFunc(\"GET /{$}\", index)                 // só a raiz exata\n\nfunc getItem(w http.ResponseWriter, r *http.Request) {\n\tid := r.PathValue(\"id\") // já decodificado\n\t...\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "O padrão é `[MÉTODO ][HOST]/[CAMINHO]`. `GET` também casa `HEAD`; método fora da lista responde **405** com cabeçalho `Allow` automaticamente.",
+            "Vence o padrão **mais específico**. Dois padrões ambíguos causam `panic` no registro, ou seja, no start, nunca em produção sob carga.",
+            "`r.Pattern` (Go 1.23) traz o padrão casado: use-o como rótulo de métricas em vez de `r.URL.Path`, que explode a cardinalidade com IDs."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Ciclo de vida de uma requisição"
+        },
+        {
+          "type": "diagram",
+          "title": "Do socket ao handler",
+          "cols": 12,
+          "rows": 20,
+          "nodes": [
+            {
+              "id": "cli",
+              "label": "Cliente",
+              "sub": "HTTP/1.1 ou h2",
+              "x": 3,
+              "y": 0,
+              "w": 6,
+              "h": 2
+            },
+            {
+              "id": "srv",
+              "label": "http.Server",
+              "sub": "Accept · timeouts",
+              "x": 3,
+              "y": 4.2,
+              "w": 6,
+              "h": 2,
+              "variant": "accent"
+            },
+            {
+              "id": "mux",
+              "label": "ServeMux",
+              "sub": "GET /items/{id}",
+              "x": 3,
+              "y": 8.2,
+              "w": 6,
+              "h": 2
+            },
+            {
+              "id": "mw",
+              "label": "Middlewares",
+              "sub": "log · recover · auth",
+              "x": 3,
+              "y": 12.2,
+              "w": 6,
+              "h": 2
+            },
+            {
+              "id": "h",
+              "label": "Handler",
+              "sub": "decode · lógica · encode",
+              "x": 3,
+              "y": 16.2,
+              "w": 6,
+              "h": 2
+            }
+          ],
+          "edges": [
+            {
+              "from": "cli",
+              "to": "srv",
+              "label": "conexão TCP"
+            },
+            {
+              "from": "srv",
+              "to": "mux",
+              "label": "goroutine/conn",
+              "accent": true
+            },
+            {
+              "from": "mux",
+              "to": "mw",
+              "label": "rota casada"
+            },
+            {
+              "from": "mw",
+              "to": "h",
+              "label": "next.ServeHTTP"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Processo Go",
+              "x": 0.5,
+              "y": 3.2,
+              "w": 11,
+              "h": 16.8,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "O servidor aceita a conexão e atende cada requisição em uma goroutine. O contexto da requisição é cancelado se o cliente desconecta, e é por ele que o cancelamento chega ao banco e a chamadas downstream."
+        },
+        {
+          "type": "h",
+          "text": "Middleware"
+        },
+        {
+          "type": "p",
+          "text": "Um middleware é uma função `func(http.Handler) http.Handler`: recebe o próximo elo e devolve outro. A composição é só aplicação de funções, com a ordem importando (o último aplicado fica por fora e executa primeiro)."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type middleware func(http.Handler) http.Handler\n\nfunc chain(h http.Handler, mws ...middleware) http.Handler {\n\tfor _, mw := range mws {\n\t\th = mw(h)\n\t}\n\treturn h\n}\n\nfunc (s *server) recoverer(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tdefer func() {\n\t\t\tif v := recover(); v != nil {\n\t\t\t\ts.log.Error(\"panic\", \"value\", v)\n\t\t\t\thttp.Error(w, \"erro interno\", 500)\n\t\t\t}\n\t\t}()\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\n// logging por fora: registra também as respostas 500 do recoverer\nhandler := chain(mux, s.recoverer, s.logging)",
+          "file": "middleware.go"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "O servidor já recupera panics por conexão e apenas registra no log do `http.Server`; o `recoverer` serve para responder 500 de forma controlada e padronizar o log. Para guardar valores no contexto (ID de requisição, usuário) use um tipo não exportado como chave.",
+          "title": "Panics"
+        },
+        {
+          "type": "h",
+          "text": "Timeouts: por que os padrões são perigosos"
+        },
+        {
+          "type": "p",
+          "text": "`http.ListenAndServe` e um `http.Server{}` vazio têm **todos os timeouts em zero, isto é, infinitos**. Um cliente que abre conexões e envia um byte por minuto (*Slowloris*) mantém goroutines e descritores de arquivo presos até o processo esgotar. O mesmo vale ao contrário: `http.DefaultClient` não tem timeout, e uma dependência lenta trava suas goroutines para sempre."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Campo",
+            "Cobre",
+            "Dica"
+          ],
+          "rows": [
+            [
+              "`ReadHeaderTimeout`",
+              "Leitura dos cabeçalhos",
+              "Sempre defina (ex.: 5 s). É o mais importante contra Slowloris."
+            ],
+            [
+              "`ReadTimeout`",
+              "Cabeçalhos + corpo inteiro",
+              "Limita uploads lentos; ajuste ao maior corpo esperado."
+            ],
+            [
+              "`WriteTimeout`",
+              "Do fim dos cabeçalhos até o fim da resposta",
+              "Quebra streaming/SSE; use `http.NewResponseController(w).SetWriteDeadline` por rota."
+            ],
+            [
+              "`IdleTimeout`",
+              "Conexão keep-alive ociosa",
+              "Menor que o idle do load balancer, para o servidor não ser surpreendido."
+            ],
+            [
+              "`MaxHeaderBytes`",
+              "Tamanho dos cabeçalhos",
+              "Padrão de 1 MiB; reduza se possível."
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "srv := &http.Server{\n\tAddr:              \":8080\",\n\tHandler:           handler,\n\tReadHeaderTimeout: 5 * time.Second,\n\tReadTimeout:       10 * time.Second,\n\tWriteTimeout:      15 * time.Second,\n\tIdleTimeout:       60 * time.Second,\n}\n\nclient := &http.Client{Timeout: 10 * time.Second} // total, inclui o corpo"
+        },
+        {
+          "type": "p",
+          "text": "Os timeouts do servidor protegem a **conexão**. Para limitar o tempo de **lógica** de um handler, use `context.WithTimeout` sobre `r.Context()` ou `http.TimeoutHandler`, e propague o contexto até o banco."
+        },
+        {
+          "type": "h",
+          "text": "JSON: armadilhas de encoding/json"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func (s *server) createItem(w http.ResponseWriter, r *http.Request) {\n\tr.Body = http.MaxBytesReader(w, r.Body, 1<<20) // limite de 1 MiB\n\tdec := json.NewDecoder(r.Body)\n\tdec.DisallowUnknownFields() // typos viram 400, não silêncio\n\n\tvar in Item\n\tif err := dec.Decode(&in); err != nil {\n\t\thttp.Error(w, \"JSON inválido\", http.StatusBadRequest)\n\t\treturn\n\t}\n\tif dec.More() { // lixo depois do primeiro valor\n\t\thttp.Error(w, \"corpo com dados extras\", http.StatusBadRequest)\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusCreated, in)\n}\n\nfunc writeJSON(w http.ResponseWriter, status int, v any) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tw.WriteHeader(status)\n\tif err := json.NewEncoder(w).Encode(v); err != nil {\n\t\tslog.Error(\"encode\", \"err\", err)\n\t}\n}"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Pegadinha",
+            "Efeito",
+            "O que fazer"
+          ],
+          "rows": [
+            [
+              "Slice `nil`",
+              "Serializa como `null`, não `[]`",
+              "Inicialize com `[]T{}` quando o cliente espera array."
+            ],
+            [
+              "Número em `any`",
+              "Vira `float64`; perde precisão acima de 2^53",
+              "Use struct tipada ou `Decoder.UseNumber()`."
+            ],
+            [
+              "Campo não exportado",
+              "Ignorado em silêncio",
+              "Exporte o campo e use tag `json:\"nome\"`."
+            ],
+            [
+              "`omitempty` em struct ou `time.Time`",
+              "Não omite o valor zero",
+              "Use `omitzero` (Go 1.24) ou ponteiro."
+            ],
+            [
+              "Nomes de campo",
+              "Decodificação ignora maiúsculas/minúsculas",
+              "Valide com `DisallowUnknownFields`."
+            ],
+            [
+              "Erro após `WriteHeader`",
+              "Status já foi enviado",
+              "Codifique num buffer antes se a falha for possível."
+            ],
+            [
+              "Escape de HTML",
+              "`<`, `>` e `&` viram `\\u003c`...",
+              "`enc.SetEscapeHTML(false)` em APIs não-HTML."
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "O pacote `encoding/json/v2` está disponível como experimento (`GOEXPERIMENT=jsonv2`) e corrige várias dessas arestas, mas a API v1 continua sendo o padrão estável.",
+          "title": "Futuro"
+        },
+        {
+          "type": "h",
+          "text": "Desligamento gracioso"
+        },
+        {
+          "type": "p",
+          "text": "A parte 2 detalhou o padrão. Em resumo: `signal.NotifyContext` para SIGTERM, `ListenAndServe` em goroutine, e `srv.Shutdown(ctx)` com prazo, que para de aceitar conexões e espera as requisições ativas. Em Kubernetes, o prazo deve ficar abaixo de `terminationGracePeriodSeconds`, e a readiness deve falhar assim que o sinal chegar para o Service parar de enviar tráfego."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "ctx, stop := signal.NotifyContext(context.Background(),\n\tos.Interrupt, syscall.SIGTERM)\ndefer stop()\n\ngo func() {\n\tif err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {\n\t\tlog.Error(\"listen\", \"err\", err)\n\t\tstop()\n\t}\n}()\n\n<-ctx.Done()\nshCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)\ndefer cancel()\nif err := srv.Shutdown(shCtx); err != nil {\n\tlog.Error(\"shutdown\", \"err\", err)\n}"
+        }
+      ]
+    },
+    {
+      "id": "observabilidade",
+      "title": "Logs, configuração e observabilidade",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um serviço em produção precisa responder três perguntas sem você anexar um depurador: o que aconteceu (**logs**), quanto e com que frequência (**métricas**) e por onde a requisição passou (**traces**)."
+        },
+        {
+          "type": "h",
+          "text": "Logging estruturado com log/slog"
+        },
+        {
+          "type": "p",
+          "text": "`log/slog` (Go 1.21) emite registros com nível, mensagem e pares chave-valor. O *handler* decide o formato: `NewJSONHandler` para produção (uma linha JSON por evento em stdout, que o agente de logs coleta) e `NewTextHandler` para desenvolvimento. O logger é barato quando o nível está desligado, e `With` cria loggers derivados com atributos fixos."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "lvl := new(slog.LevelVar) // nível alterável em runtime\nlvl.Set(slog.LevelInfo)\n\nh := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})\nlog := slog.New(h).With(\"service\", \"api\", \"version\", version)\nslog.SetDefault(log) // o pacote log passa a usar este handler\n\nlog.InfoContext(ctx, \"pedido criado\",\n\t\"order_id\", id,\n\tslog.Group(\"cliente\", \"id\", c.ID, \"plano\", c.Plan),\n\tslog.Duration(\"dur\", time.Since(start)),\n)"
+        },
+        {
+          "type": "code",
+          "lang": "json",
+          "code": "{\"time\":\"2026-10-18T20:16:41-03:00\",\"level\":\"INFO\",\"msg\":\"pedido criado\",\n \"service\":\"api\",\"version\":\"1.4.2\",\"order_id\":\"o-91\",\n \"cliente\":{\"id\":\"c-7\",\"plano\":\"pro\"},\"dur\":1204000}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Mensagem **constante**, dados em atributos: facilita agregação (`msg = \"pedido criado\"`).",
+            "Implemente `LogValuer` em tipos sensíveis para redigir segredos automaticamente (exemplo abaixo).",
+            "Em testes, `slog.New(slog.DiscardHandler)` (Go 1.24) silencia a saída.",
+            "Não logue e retorne o mesmo erro em cada camada: o resultado são cinco linhas para uma falha. Logue onde o erro é tratado."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Secret string\n\nfunc (Secret) LogValue() slog.Value { return slog.StringValue(\"[REDACTED]\") }\n\nlog.Info(\"conectando\", \"dsn\", Secret(cfg.DSN)) // \"dsn\":\"[REDACTED]\""
+        },
+        {
+          "type": "h",
+          "text": "Configuração"
+        },
+        {
+          "type": "p",
+          "text": "O princípio dos *twelve-factor apps*: configuração vem do ambiente, o mesmo binário roda em todos os ambientes. Em Go isso é `flag` + `os.LookupEnv`, validação **na partida** e falha rápida com mensagem clara. Prefira uma struct tipada passada por construtor a variáveis globais."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Config struct {\n\tAddr     string\n\tLogLevel slog.Level\n\tDSN      string\n}\n\nfunc Load(args []string) (Config, error) {\n\tvar c Config\n\tfs := flag.NewFlagSet(\"api\", flag.ContinueOnError)\n\tfs.StringVar(&c.Addr, \"addr\", getenv(\"ADDR\", \":8080\"), \"endereço HTTP\")\n\tlevel := fs.String(\"log-level\", getenv(\"LOG_LEVEL\", \"info\"), \"nível\")\n\tif err := fs.Parse(args); err != nil {\n\t\treturn c, err\n\t}\n\tif err := c.LogLevel.UnmarshalText([]byte(*level)); err != nil {\n\t\treturn c, fmt.Errorf(\"LOG_LEVEL inválido: %w\", err)\n\t}\n\tif c.DSN = os.Getenv(\"DATABASE_URL\"); c.DSN == \"\" {\n\t\treturn c, errors.New(\"DATABASE_URL é obrigatória\")\n\t}\n\treturn c, nil\n}\n\nfunc getenv(key, def string) string {\n\tif v := os.Getenv(key); v != \"\" {\n\t\treturn v\n\t}\n\treturn def\n}",
+          "file": "internal/config/config.go"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Segredos em variáveis de ambiente vazam em dumps de processo e em `kubectl describe`. Prefira arquivos montados de um Secret e leia o caminho por flag. Nunca grave o valor em logs.",
+          "title": "Segredos"
+        },
+        {
+          "type": "h",
+          "text": "Métricas"
+        },
+        {
+          "type": "p",
+          "text": "A biblioteca padrão traz `expvar`, que publica contadores em `/debug/vars` em JSON: bom para depuração, sem histogramas nem rótulos. O padrão de fato em produção é o cliente Prometheus (`prometheus/client_golang`), com um endpoint `/metrics` em texto que o servidor Prometheus raspa. Siga o método **RED**: taxa de requisições, erros e duração."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var reqDur = promauto.NewHistogramVec(prometheus.HistogramOpts{\n\tName:    \"http_request_duration_seconds\",\n\tHelp:    \"Duração das requisições HTTP.\",\n\tBuckets: prometheus.DefBuckets,\n}, []string{\"method\", \"route\", \"status\"})\n\nfunc (s *server) metrics(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tstart := time.Now()\n\t\trec := &statusRecorder{ResponseWriter: w, status: 200}\n\t\tnext.ServeHTTP(rec, r)\n\t\treqDur.WithLabelValues(r.Method, r.Pattern,\n\t\t\tstrconv.Itoa(rec.status)).Observe(time.Since(start).Seconds())\n\t})\n}\n\nmux.Handle(\"GET /metrics\", promhttp.Handler())"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Rótulo com valor ilimitado (ID de usuário, caminho cru, mensagem de erro) cria uma série temporal nova para cada valor e derruba o Prometheus. Use `r.Pattern`, nunca `r.URL.Path`.",
+          "title": "Cardinalidade"
+        },
+        {
+          "type": "p",
+          "text": "Para **traces** distribuídos, o padrão é o **OpenTelemetry**: o SDK Go exporta spans, métricas e logs via OTLP para um coletor. O pacote `otelhttp` envolve o handler e o cliente HTTP, propagando o contexto `traceparent` entre serviços. Como o `context.Context` já passa por todas as camadas, instrumentar é questão de abrir spans onde faz sentido. Exponha também `/healthz` (liveness: o processo responde) e `/readyz` (readiness: dependências prontas) para as probes do Kubernetes."
+        }
+      ]
+    },
+    {
+      "id": "desempenho",
+      "title": "Desempenho: pprof e benchmarks",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Regra de ouro: **meça, não adivinhe**. Go traz perfilamento na toolchain. O ciclo de otimização é sempre o mesmo, e cada passo tem uma ferramenta."
+        },
+        {
+          "type": "diagram",
+          "title": "Ciclo de otimização",
+          "cols": 12,
+          "rows": 8.4,
+          "nodes": [
+            {
+              "id": "bench",
+              "label": "1 · Benchmark",
+              "sub": "-count=10 antes",
+              "x": 0.5,
+              "y": 0.6,
+              "w": 5,
+              "h": 2.2
+            },
+            {
+              "id": "prof",
+              "label": "2 · pprof",
+              "sub": "cpu · alloc · trace",
+              "x": 7,
+              "y": 0.6,
+              "w": 4.5,
+              "h": 2.2,
+              "variant": "accent"
+            },
+            {
+              "id": "fix",
+              "label": "3 · Mudar",
+              "sub": "uma hipótese só",
+              "x": 7,
+              "y": 5.6,
+              "w": 4.5,
+              "h": 2.2
+            },
+            {
+              "id": "stat",
+              "label": "4 · benchstat",
+              "sub": "compara antes/depois",
+              "x": 0.5,
+              "y": 5.6,
+              "w": 5,
+              "h": 2.2
+            }
+          ],
+          "edges": [
+            {
+              "from": "bench",
+              "to": "prof",
+              "label": "hot spot?"
+            },
+            {
+              "from": "prof",
+              "to": "fix",
+              "label": "alvo"
+            },
+            {
+              "from": "fix",
+              "to": "stat",
+              "label": "re-medir"
+            },
+            {
+              "from": "stat",
+              "to": "bench",
+              "dashed": true,
+              "label": "ainda lento"
+            }
+          ],
+          "groups": [],
+          "caption": "Mudar duas coisas por vez impede saber qual ajudou. Sem comparação estatística, ruído vira \"otimização\"."
+        },
+        {
+          "type": "h",
+          "text": "Expondo o pprof"
+        },
+        {
+          "type": "p",
+          "text": "Importar `net/http/pprof` com `_` registra rotas em `/debug/pprof/` no `DefaultServeMux`. Isso é perigoso: se o seu servidor público usa o mux padrão, você acabou de publicar heap dumps e goroutine stacks. Sirva o pprof em um **listener separado**, em `localhost` ou numa porta interna, com um mux próprio."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "import \"net/http/pprof\"\n\nfunc debugServer() *http.Server {\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"/debug/pprof/\", pprof.Index)\n\tmux.HandleFunc(\"/debug/pprof/profile\", pprof.Profile)\n\tmux.HandleFunc(\"/debug/pprof/trace\", pprof.Trace)\n\tmux.HandleFunc(\"/debug/pprof/symbol\", pprof.Symbol)\n\tmux.HandleFunc(\"/debug/pprof/cmdline\", pprof.Cmdline)\n\treturn &http.Server{\n\t\tAddr:              \"127.0.0.1:6060\",\n\t\tHandler:           mux,\n\t\tReadHeaderTimeout: 5 * time.Second,\n\t}\n}",
+          "file": "debug.go"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# CPU por 30 s, UI web com flame graph (View > Flame Graph)\ngo tool pprof -http=:8081 \\\n  'http://localhost:6060/debug/pprof/profile?seconds=30'\n\n# memória: objetos vivos vs. total alocado\ngo tool pprof -sample_index=inuse_space http://localhost:6060/debug/pprof/heap\ngo tool pprof -sample_index=alloc_space  http://localhost:6060/debug/pprof/allocs\n\n# vazamento de goroutines: pilhas completas, agrupadas\ncurl 'http://localhost:6060/debug/pprof/goroutine?debug=2' | less\n\n# comparar dois perfis (o que mudou?)\ngo tool pprof -base antes.pb.gz depois.pb.gz"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**flat** é o tempo gasto na própria função; **cum** inclui o que ela chama. Comece por `top` e `list NomeDaFunc` para ver custo por linha.",
+            "Perfil de CPU amostra ~100 vezes por segundo: precisa de carga real e de dezenas de segundos.",
+            "`heap` mostra o que está **vivo**; `allocs` mostra tudo que foi alocado desde o início. Para pressão de GC, olhe `alloc_space`.",
+            "Perfis de `mutex` e `block` ficam desligados até `runtime.SetMutexProfileFraction` e `runtime.SetBlockProfileRate`.",
+            "`go tool trace` mostra a linha do tempo de goroutines e do GC; o *flight recorder* (`runtime/trace`, Go 1.25) mantém um buffer circular do trace para capturar o instante de um incidente."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Benchmarks e benchstat"
+        },
+        {
+          "type": "p",
+          "text": "Uma única execução de benchmark mede o ruído da sua máquina. Rode `-count=10` antes e depois e deixe o `benchstat` aplicar teste estatístico: ele só marca a diferença quando é significativa (`~` significa sem diferença detectável)."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go test -bench=Parse -benchmem -count=10 -run='^$' > old.txt\n# ...muda o código...\ngo test -bench=Parse -benchmem -count=10 -run='^$' > new.txt\ngo tool benchstat old.txt new.txt"
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "              │   old.txt   │            new.txt            │\n              │   sec/op    │   sec/op     vs base          │\nParse-20        812.4n ± 2%   301.7n ± 1%  -62.86% (p=0.000 n=10)\n\n              │    B/op     │    B/op      vs base          │\nParse-20         576.0 ± 0%   0.0 ± 0%    -100.00% (p=0.000 n=10)"
+        },
+        {
+          "type": "p",
+          "text": "O exemplo acima é ilustrativo. Duas ajudas extras: **PGO** (*profile-guided optimization*), em que um perfil de CPU de produção salvo como `default.pgo` na raiz do `main` faz o compilador inlinar e otimizar os caminhos quentes (`go build -pgo=auto`, tipicamente alguns pontos percentuais); e, no Go 1.25, `GOMAXPROCS` que respeita o limite de CPU do cgroup."
+        },
+        {
+          "type": "h",
+          "text": "Escape analysis e alocações"
+        },
+        {
+          "type": "p",
+          "text": "Cada alocação no heap custa tempo de alocador **e** trabalho futuro para o GC. O compilador decide se um valor fica na pilha (barata, liberada ao retornar) ou \"escapa\" para o heap. Você enxerga a decisão com `-gcflags=-m`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func newBuf() *bytes.Buffer {\n\tb := bytes.Buffer{}\n\treturn &b // o ponteiro sobrevive à função\n}"
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "$ go build -gcflags='-m' ./...\n./buf.go:9:2: moved to heap: b\n./log.go:14:13: ... argument does not escape\n./log.go:14:14: x escapes to heap"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Técnica",
+            "Efeito"
+          ],
+          "rows": [
+            [
+              "`make([]T, 0, n)` com capacidade conhecida",
+              "Evita realocações e cópias em `append`."
+            ],
+            [
+              "`strings.Builder` / `bytes.Buffer` reutilizado",
+              "Concatenar em laço com `+=` aloca uma string nova por volta."
+            ],
+            [
+              "`strconv` em vez de `fmt.Sprintf` em caminho quente",
+              "`fmt` usa reflexão e converte argumentos para `any`."
+            ],
+            [
+              "Evitar conversão repetida `[]byte` ↔ `string`",
+              "Cada conversão copia."
+            ],
+            [
+              "Estruturas com poucos ponteiros",
+              "O GC percorre ponteiros; um `[]struct` sem ponteiros é pulado."
+            ],
+            [
+              "Passar valores pequenos por valor",
+              "Ponteiros tendem a forçar escape; valor fica na pilha."
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "sync.Pool com cuidado"
+        },
+        {
+          "type": "p",
+          "text": "`sync.Pool` reutiliza objetos temporários (buffers) entre goroutines sem lock global, aliviando o GC. Mas o conteúdo é **esvaziado a cada ciclo de GC** (com um *victim cache* de uma geração), então é cache de otimização, nunca de estado."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var bufPool = sync.Pool{\n\tNew: func() any { return new(bytes.Buffer) },\n}\n\nfunc render(w io.Writer, v any) error {\n\tbuf := bufPool.Get().(*bytes.Buffer)\n\tbuf.Reset()                 // sempre limpe ao pegar\n\tdefer bufPool.Put(buf)\n\tif err := json.NewEncoder(buf).Encode(v); err != nil {\n\t\treturn err\n\t}\n\t_, err := w.Write(buf.Bytes())\n\treturn err\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Não devolva ao pool buffers que cresceram demais (um de 50 MB retido por requisição atípica fica em memória), não guarde ponteiros para dentro de um objeto já devolvido e **só use depois de medir**: em objetos pequenos o pool pode ser mais lento que alocar.",
+          "title": "Caveats"
+        }
+      ]
+    },
+    {
+      "id": "memoria-gc",
+      "title": "Memória e coletor de lixo",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O coletor do Go é **concorrente, de marcação e varredura tricolor**, não geracional e **sem compactação**. Ele marca os objetos alcançáveis a partir das raízes (pilhas, globais) enquanto seu programa continua rodando, usando uma *write barrier* para não perder objetos que mudam de lugar durante a marcação. As pausas *stop-the-world* são curtas (tipicamente sub-milissegundo): o custo real do GC é **CPU** e o trabalho que goroutines que alocam muito são forçadas a fazer (*mark assist*)."
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Sweep termination",
+              "text": "Pausa breve: termina a varredura do ciclo anterior e liga a write barrier."
+            },
+            {
+              "title": "Marcação concorrente",
+              "text": "Workers em segundo plano (cerca de 25% da CPU) colorem objetos de branco para cinza e preto; alocadores ajudam se o heap cresce rápido demais."
+            },
+            {
+              "title": "Mark termination",
+              "text": "Pausa breve: confirma que não há cinzas restantes e desliga a barrier."
+            },
+            {
+              "title": "Varredura concorrente",
+              "text": "A memória dos objetos brancos é liberada de forma preguiçosa, conforme o alocador precisa."
+            }
+          ]
+        },
+        {
+          "type": "h",
+          "text": "GOGC: quando o próximo ciclo começa"
+        },
+        {
+          "type": "p",
+          "text": "O alvo do próximo ciclo é proporcional ao **heap vivo** do ciclo anterior: com `GOGC=100` (padrão), o GC dispara quando o heap chega a cerca de **2x** o live heap (considerando também pilhas e globais). Dobrar `GOGC` troca memória por menos CPU; reduzir faz o inverso. O resultado é o clássico gráfico em dente de serra."
+        },
+        {
+          "type": "h",
+          "text": "GOMEMLIMIT: o teto suave"
+        },
+        {
+          "type": "p",
+          "text": "`GOGC` ignora quanto de memória você tem. Num container com limite de 1 GiB e live heap de 600 MiB, o alvo de 1,2 GiB passa do limite e o kernel mata o processo (**OOMKilled**) sem que o GC tenha chance de reagir. `GOMEMLIMIT` (Go 1.19) define um limite **suave** para toda a memória gerenciada pelo runtime: ao se aproximar, o GC roda com mais frequência. Para evitar espiral da morte, a CPU gasta com GC é limitada a cerca de 50%; se nem assim couber, o limite é excedido em vez de travar o programa."
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Heap ao longo do tempo (limite do container: 240 MiB)",
+          "xLabel": "tempo (s)",
+          "yLabel": "HEAP (MiB)",
+          "yMax": 300,
+          "series": [
+            {
+              "name": "Limite do container",
+              "tone": "muted",
+              "dashed": true,
+              "points": [
+                [
+                  0,
+                  240
+                ],
+                [
+                  60,
+                  240
+                ]
+              ]
+            },
+            {
+              "name": "Só GOGC=100",
+              "tone": "primary",
+              "points": [
+                [
+                  0,
+                  80
+                ],
+                [
+                  10,
+                  160
+                ],
+                [
+                  10,
+                  90
+                ],
+                [
+                  20,
+                  180
+                ],
+                [
+                  20,
+                  100
+                ],
+                [
+                  30,
+                  200
+                ],
+                [
+                  30,
+                  110
+                ],
+                [
+                  40,
+                  220
+                ],
+                [
+                  40,
+                  120
+                ],
+                [
+                  50,
+                  240
+                ],
+                [
+                  50,
+                  130
+                ],
+                [
+                  60,
+                  260
+                ]
+              ]
+            },
+            {
+              "name": "GOGC=100 + GOMEMLIMIT=216MiB",
+              "tone": "accent",
+              "points": [
+                [
+                  0,
+                  80
+                ],
+                [
+                  10,
+                  160
+                ],
+                [
+                  10,
+                  90
+                ],
+                [
+                  20,
+                  180
+                ],
+                [
+                  20,
+                  100
+                ],
+                [
+                  30,
+                  200
+                ],
+                [
+                  30,
+                  110
+                ],
+                [
+                  40,
+                  216
+                ],
+                [
+                  40,
+                  120
+                ],
+                [
+                  48,
+                  216
+                ],
+                [
+                  48,
+                  128
+                ],
+                [
+                  55,
+                  216
+                ],
+                [
+                  55,
+                  135
+                ],
+                [
+                  60,
+                  180
+                ]
+              ]
+            }
+          ],
+          "caption": "Ilustrativo, não medição. O live heap cresce devagar; só com GOGC o pico dobra o live heap e chega ao limite em ~50 s e o ultrapassa depois (OOMKilled). Com GOMEMLIMIT o teto vale 90% do limite: o GC passa a rodar mais cedo e mais vezes, trocando CPU por sobrevivência. Toque no gráfico para ver os valores."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "# Pod com limit de 1 GiB: deixe margem para pilhas, cgo, mmap, runtime\nenv:\n  - name: GOMEMLIMIT\n    value: \"900MiB\"          # ~90% do limits.memory\nresources:\n  limits:\n    memory: 1Gi\n    cpu: \"2\"",
+          "file": "deployment.yaml"
+        },
+        {
+          "type": "list",
+          "items": [
+            "O Go **não lê** o limite de memória do cgroup sozinho: configure `GOMEMLIMIT` (ou `debug.SetMemoryLimit`) explicitamente, em geral 80 a 90% do limite.",
+            "Desde o Go 1.25, `GOMAXPROCS` passa a respeitar o limite de **CPU** do cgroup (e se atualiza se ele mudar). Em versões anteriores, use `automaxprocs`, senão o runtime enxerga todos os núcleos do nó e sofre *throttling* do CFS.",
+            "`GOGC=off` com `GOMEMLIMIT` faz o GC rodar só perto do teto: ótimo em processos dedicados com heap previsível, arriscado se o live heap se aproxima do limite.",
+            "O live heap real precisa caber: o limite não cria memória, só antecipa coletas."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "O coletor continua evoluindo. O experimento *Green Tea* (coleta orientada a localidade de memória, reduzindo custo em programas com muitos objetos pequenos) entrou como opt-in no Go 1.25 e, segundo as notas de release, passou a ser o padrão no Go 1.26. Confira a documentação da sua versão antes de depender dele.",
+          "title": "Green Tea GC"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "GODEBUG=gctrace=1 ./app\n# gc 14 @3.2s 1%: 0.02+1.8+0.03 ms clock, ... 120->122->61 MB, 125 MB goal, 20 P\n#                                              ^ antes->depois->vivo   ^ alvo"
+        },
+        {
+          "type": "p",
+          "text": "Para monitorar sem logs de debug, exponha métricas do `runtime/metrics` (o cliente Prometheus já inclui o coletor de Go): `go_memstats_heap_inuse_bytes`, `go_gc_duration_seconds` e `go_goroutines`. Evite `runtime.ReadMemStats` em caminho quente, pois pausa o mundo."
+        }
+      ]
+    },
+    {
+      "id": "containers",
+      "title": "Empacotando para containers",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Go compila para um **binário único e estático**. Isso dispensa runtime, gerenciador de pacotes e quase todo o sistema operacional dentro da imagem. O objetivo é uma imagem pequena, reproduzível e com superfície de ataque mínima."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Flag",
+            "Efeito"
+          ],
+          "rows": [
+            [
+              "`CGO_ENABLED=0`",
+              "Liga o resolvedor DNS e o `os/user` puros em Go; binário sem dependência de libc. Bibliotecas que exigem cgo (ex.: `mattn/go-sqlite3`) pedem alternativa pura, como `modernc.org/sqlite`."
+            ],
+            [
+              "`-trimpath`",
+              "Remove caminhos locais do binário: builds reproduzíveis e sem vazar `/home/usuario`."
+            ],
+            [
+              "`-ldflags=\"-s -w\"`",
+              "Tira tabela de símbolos e DWARF (~25% menor). Stack traces continuam funcionando; perde-se depuração com Delve."
+            ],
+            [
+              "`-ldflags=\"-X main.version=1.4.2\"`",
+              "Injeta o valor de uma `var` de string em tempo de link. Não funciona com `const`."
+            ],
+            [
+              "`GOOS=linux GOARCH=arm64`",
+              "Cross-compilação nativa, sem toolchain extra."
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var version = \"dev\" // sobrescrita pelo -X\n\nfunc main() {\n\tif bi, ok := debug.ReadBuildInfo(); ok {\n\t\tfor _, s := range bi.Settings {\n\t\t\tif s.Key == \"vcs.revision\" { // commit, automático em go build\n\t\t\t\tslog.Info(\"build\", \"version\", version, \"rev\", s.Value)\n\t\t\t}\n\t\t}\n\t}\n}"
+        },
+        {
+          "type": "h",
+          "text": "Dockerfile multi-stage"
+        },
+        {
+          "type": "diagram",
+          "title": "Build em dois estágios",
+          "cols": 12,
+          "rows": 14,
+          "nodes": [
+            {
+              "id": "src",
+              "label": "Código",
+              "sub": "go.mod · *.go",
+              "x": 0.5,
+              "y": 1,
+              "w": 4.5,
+              "h": 2.4
+            },
+            {
+              "id": "build",
+              "label": "go build",
+              "sub": "CGO_ENABLED=0",
+              "x": 7,
+              "y": 1,
+              "w": 4.5,
+              "h": 2.4,
+              "variant": "accent"
+            },
+            {
+              "id": "img",
+              "label": "Imagem final",
+              "sub": "~12 MB · nonroot",
+              "x": 0.5,
+              "y": 9.2,
+              "w": 4.5,
+              "h": 2.4,
+              "variant": "accent"
+            },
+            {
+              "id": "bin",
+              "label": "/app",
+              "sub": "binário estático",
+              "x": 7,
+              "y": 9.2,
+              "w": 4.5,
+              "h": 2.4
+            }
+          ],
+          "edges": [
+            {
+              "from": "src",
+              "to": "build",
+              "label": "compila"
+            },
+            {
+              "from": "build",
+              "to": "bin",
+              "label": "COPY --from=build",
+              "dashed": true
+            },
+            {
+              "from": "bin",
+              "to": "img",
+              "label": "ENTRYPOINT"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Estágio 1 · golang (descartado)",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 5.2
+            },
+            {
+              "label": "Estágio 2 · distroless/static",
+              "x": 0,
+              "y": 7.2,
+              "w": 12,
+              "h": 6.8
+            }
+          ],
+          "caption": "Toda a toolchain (centenas de MB) fica no primeiro estágio. Só o binário atravessa para a imagem final."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "# syntax=docker/dockerfile:1\nFROM golang:1.27 AS build\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN --mount=type=cache,target=/go/pkg/mod go mod download\nCOPY . .\nARG VERSION=dev\nRUN --mount=type=cache,target=/go/pkg/mod \\\n    --mount=type=cache,target=/root/.cache/go-build \\\n    CGO_ENABLED=0 go build -trimpath \\\n      -ldflags=\"-s -w -X main.version=${VERSION}\" \\\n      -o /out/app ./cmd/api\n\nFROM gcr.io/distroless/static:nonroot\nCOPY --from=build /out/app /app\nEXPOSE 8080\nENTRYPOINT [\"/app\"]",
+          "file": "Dockerfile"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Copie `go.mod`/`go.sum` e rode `go mod download` **antes** de copiar o código: a camada de dependências só é refeita quando elas mudam.",
+            "Os `--mount=type=cache` do BuildKit mantêm o cache de módulos e de compilação entre builds.",
+            "A tag `:nonroot` roda como UID 65532. Combine com `securityContext.runAsNonRoot` e `readOnlyRootFilesystem` no Pod.",
+            "Fixe a imagem por digest em produção e use a mesma versão do Go do `go.mod`.",
+            "Alternativa sem Dockerfile: `ko build ./cmd/api` compila e publica uma imagem distroless direto do código Go."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Qual base escolher"
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Tamanho aproximado da imagem",
+          "unit": "MB",
+          "bars": [
+            {
+              "label": "golang:1.27 (com toolchain)",
+              "value": 850,
+              "display": "~850 MB"
+            },
+            {
+              "label": "golang:1.27-alpine",
+              "value": 330,
+              "display": "~330 MB"
+            },
+            {
+              "label": "alpine + binário",
+              "value": 20,
+              "display": "~20 MB"
+            },
+            {
+              "label": "distroless/static + binário",
+              "value": 12,
+              "display": "~12 MB"
+            },
+            {
+              "label": "scratch + binário",
+              "value": 10,
+              "display": "~10 MB"
+            }
+          ],
+          "caption": "Valores aproximados, assumindo um binário de ~10 MB; variam com a versão da imagem e da sua aplicação. A queda decisiva vem de não levar a toolchain para produção."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Base",
+            "Contém",
+            "Quando usar"
+          ],
+          "rows": [
+            [
+              "`scratch`",
+              "Nada",
+              "Menor possível. Você copia CA certs (`/etc/ssl/certs`) e importa `time/tzdata`; sem usuário nem shell."
+            ],
+            [
+              "`distroless/static`",
+              "CA certs, tzdata, `/etc/passwd`, usuário nonroot",
+              "Padrão recomendado para binários estáticos."
+            ],
+            [
+              "`alpine`",
+              "musl, shell, `apk`",
+              "Quando precisa de ferramentas de depuração na imagem."
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Sem shell na imagem, depure com `kubectl debug -it pod/x --image=busybox --target=app` (container efêmero) e com o pprof, em vez de `kubectl exec`.",
+          "title": "Depurando imagens enxutas"
+        }
+      ]
+    },
+    {
+      "id": "kubernetes",
+      "title": "Go e Kubernetes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Kubernetes é escrito em Go, e seu ecossistema (operators, CLIs, admission webhooks) também. Isso importa porque o modelo mental é o mesmo que você já usa: um servidor HTTP/JSON (a API) e clientes que observam recursos por **watch**."
+        },
+        {
+          "type": "h",
+          "text": "client-go"
+        },
+        {
+          "type": "p",
+          "text": "`k8s.io/client-go` é o cliente oficial. `rest.InClusterConfig()` usa o token do ServiceAccount montado no Pod; fora do cluster, `clientcmd` lê o kubeconfig. O *clientset* tipado expõe cada grupo de API."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "cfg, err := rest.InClusterConfig()\nif err != nil { // fora do cluster: usa ~/.kube/config\n\tcfg, err = clientcmd.BuildConfigFromFlags(\"\", kubeconfigPath)\n}\nif err != nil {\n\treturn err\n}\ncs, err := kubernetes.NewForConfig(cfg)\nif err != nil {\n\treturn err\n}\npods, err := cs.CoreV1().Pods(\"default\").List(ctx, metav1.ListOptions{})"
+        },
+        {
+          "type": "p",
+          "text": "Fazer `List` em loop é o anti-padrão que derruba API servers. Para reagir a mudanças, o cliente usa **informers**: um `List` inicial seguido de um `Watch` persistente, que alimenta um **cache local** em memória. Os *listers* leem desse cache sem tocar na rede, e cada evento (add/update/delete) enfileira a **chave** `namespace/nome` numa **workqueue**, que deduplica, serializa por chave e reaplica com backoff exponencial em caso de erro."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "factory := informers.NewSharedInformerFactory(cs, 10*time.Minute)\npodInf := factory.Core().V1().Pods()\nq := workqueue.NewTypedRateLimitingQueue(\n\tworkqueue.DefaultTypedControllerRateLimiter[string]())\n\nenqueue := func(obj any) {\n\tif key, err := cache.MetaNamespaceKeyFunc(obj); err == nil {\n\t\tq.Add(key)\n\t}\n}\npodInf.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{\n\tAddFunc:    enqueue,\n\tUpdateFunc: func(_, obj any) { enqueue(obj) },\n\tDeleteFunc: enqueue,\n})\n\nfactory.Start(ctx.Done())\nfactory.WaitForCacheSync(ctx.Done())\n\nfor { // worker\n\tkey, quit := q.Get()\n\tif quit {\n\t\treturn\n\t}\n\tif err := sync(ctx, podInf.Lister(), key); err != nil {\n\t\tq.AddRateLimited(key) // tenta de novo com backoff\n\t} else {\n\t\tq.Forget(key) // zera o backoff\n\t}\n\tq.Done(key)\n}"
+        },
+        {
+          "type": "h",
+          "text": "controller-runtime e Kubebuilder"
+        },
+        {
+          "type": "p",
+          "text": "Escrever esse encanamento à mão é raro. O **controller-runtime**, base do Kubebuilder e do Operator SDK, entrega o manager, os caches e a fila prontos. Você implementa uma única função: `Reconcile`. É o mesmo princípio do GitOps visto no outro tópico: comparar **estado desejado** com **estado observado** e agir sobre a diferença, em loop, para sempre."
+        },
+        {
+          "type": "diagram",
+          "title": "Do evento ao Reconcile",
+          "cols": 12,
+          "rows": 11.6,
+          "nodes": [
+            {
+              "id": "api",
+              "label": "API Server",
+              "sub": "etcd · watch",
+              "x": 0.5,
+              "y": 0.6,
+              "w": 4.5,
+              "h": 2
+            },
+            {
+              "id": "inf",
+              "label": "Informer + cache",
+              "sub": "list + watch",
+              "x": 7.2,
+              "y": 0.6,
+              "w": 4.6,
+              "h": 2
+            },
+            {
+              "id": "q",
+              "label": "Workqueue",
+              "sub": "ns/nome · dedup",
+              "x": 7.2,
+              "y": 4.4,
+              "w": 4.6,
+              "h": 2
+            },
+            {
+              "id": "rec",
+              "label": "Reconcile()",
+              "sub": "seu código",
+              "x": 7.2,
+              "y": 8,
+              "w": 4.6,
+              "h": 2,
+              "variant": "accent"
+            },
+            {
+              "id": "own",
+              "label": "Objetos filhos",
+              "sub": "Deploy · Service",
+              "x": 0.5,
+              "y": 8,
+              "w": 4.5,
+              "h": 2
+            }
+          ],
+          "edges": [
+            {
+              "from": "api",
+              "to": "inf",
+              "label": "eventos"
+            },
+            {
+              "from": "inf",
+              "to": "q",
+              "label": "enqueue"
+            },
+            {
+              "from": "q",
+              "to": "rec",
+              "label": "key"
+            },
+            {
+              "from": "rec",
+              "to": "own",
+              "label": "cria/atualiza",
+              "accent": true
+            },
+            {
+              "from": "own",
+              "to": "api",
+              "dashed": true,
+              "label": "novo evento"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Seu controller (Pod)",
+              "x": 6.6,
+              "y": 0,
+              "w": 5.4,
+              "h": 11.6,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "Eventos viram apenas **chaves**. O Reconcile relê o estado atual do cache e converge; se retornar erro, a chave volta à fila com backoff. Mudanças nos filhos geram novos eventos e fecham o ciclo."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type WebAppReconciler struct {\n\tclient.Client\n\tScheme *runtime.Scheme\n}\n\n// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update\n// +kubebuilder:rbac:groups=web.example.com,resources=webapps,verbs=get;list;watch\n// +kubebuilder:rbac:groups=web.example.com,resources=webapps/status,verbs=update;patch\n\nfunc (r *WebAppReconciler) Reconcile(ctx context.Context,\n\treq ctrl.Request) (ctrl.Result, error) {\n\n\tvar app webv1.WebApp\n\tif err := r.Get(ctx, req.NamespacedName, &app); err != nil {\n\t\t// apagado: os filhos caem pelo ownerReference\n\t\treturn ctrl.Result{}, client.IgnoreNotFound(err)\n\t}\n\n\tdep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{\n\t\tName: app.Name, Namespace: app.Namespace}}\n\t_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {\n\t\tdep.Spec.Replicas = &app.Spec.Replicas\n\t\tdep.Spec.Template = podTemplateFor(&app) // imagem, portas...\n\t\treturn controllerutil.SetControllerReference(&app, dep, r.Scheme)\n\t})\n\tif err != nil {\n\t\treturn ctrl.Result{}, err // volta à fila com backoff\n\t}\n\n\tapp.Status.ReadyReplicas = dep.Status.ReadyReplicas\n\treturn ctrl.Result{}, r.Status().Update(ctx, &app)\n}\n\nfunc (r *WebAppReconciler) SetupWithManager(mgr ctrl.Manager) error {\n\treturn ctrl.NewControllerManagedBy(mgr).\n\t\tFor(&webv1.WebApp{}).\n\t\tOwns(&appsv1.Deployment{}). // eventos do filho reconciliam o pai\n\t\tComplete(r)\n}",
+          "file": "internal/controller/webapp_controller.go"
+        },
+        {
+          "type": "p",
+          "text": "O exemplo é um esboço: `webv1.WebApp` é uma CRD hipotética gerada pelo Kubebuilder e `podTemplateFor` monta o template do Pod. O seletor de um Deployment é imutável, então defina-o apenas na criação."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Idempotente e baseado em nível**: o Reconcile não sabe *o que mudou*, apenas qual é o desejado agora. Rodar duas vezes deve dar o mesmo resultado.",
+            "Leituras vêm do **cache** e podem estar atrasadas; conflitos de `resourceVersion` são normais, e devolver o erro basta para uma nova tentativa.",
+            "`ctrl.Result{RequeueAfter: d}` agenda revisita periódica (ex.: checar um recurso externo). Erro retornado aciona backoff exponencial.",
+            "Limpeza de recursos externos exige **finalizers**; `ownerReferences` só cobrem objetos dentro do cluster.",
+            "Use `Status().Update` (subresource) para o status e predicates como `GenerationChangedPredicate` para não reconciliar em loop pelas próprias escritas."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Compare com o Argo CD: o *application controller* tem a mesma forma, com a Application como recurso desejado, o Git como fonte e o cluster como estado observado.",
+          "title": "Mesma ideia, outra escala"
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Sintoma",
+            "Correção"
+          ],
+          "rows": [
+            [
+              "`http.ListenAndServe` sem timeouts",
+              "Goroutines e FDs presos; queda por Slowloris",
+              "`http.Server` com `ReadHeaderTimeout` e demais campos."
+            ],
+            [
+              "`http.DefaultClient`",
+              "Chamadas travadas indefinidamente",
+              "`http.Client{Timeout: ...}` e reuso do `Transport`."
+            ],
+            [
+              "Não fechar o corpo da resposta",
+              "Conexões não reutilizadas, vazamento de FDs",
+              "`defer resp.Body.Close()` e drenar com `io.Copy(io.Discard, ...)` quando necessário."
+            ],
+            [
+              "Importar `net/http/pprof` no mux público",
+              "Heap e stacks expostos na internet",
+              "Listener separado em localhost com mux próprio."
+            ],
+            [
+              "Container sem `GOMEMLIMIT`",
+              "OOMKilled com GC \"normal\"",
+              "Definir ~90% do limite de memória."
+            ],
+            [
+              "`GOMAXPROCS` alto com cota de CPU baixa",
+              "Latência em picos por throttling",
+              "Go 1.25+ ajusta sozinho; antes, `automaxprocs`."
+            ],
+            [
+              "`replace` ou `go.work` commitado com caminho local",
+              "Build quebra em outras máquinas",
+              "Ignorar `go.work`; usar versões publicadas."
+            ],
+            [
+              "Interfaces e generics por antecipação",
+              "Assinaturas obscuras, ciclos de import",
+              "Comece concreto e abstraia na segunda ocorrência real."
+            ],
+            [
+              "Teste dormindo com `time.Sleep`",
+              "Suíte lenta e instável",
+              "`testing/synctest` ou relógio injetável."
+            ],
+            [
+              "Rótulos Prometheus de alta cardinalidade",
+              "Prometheus sem memória",
+              "Usar `r.Pattern` e valores finitos."
+            ],
+            [
+              "Nenhum `-race` no CI",
+              "Data races só em produção",
+              "`go test -race ./...` sempre."
+            ],
+            [
+              "Imagem de produção com toolchain",
+              "Imagem de ~1 GB, superfície de ataque grande",
+              "Multi-stage para distroless/static."
+            ],
+            [
+              "Reconcile que assume o evento",
+              "Estado divergente após perder um evento",
+              "Ler o estado atual e convergir (nível, não borda)."
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "internal/",
+              "def": "Diretório cujos pacotes só podem ser importados pelo módulo pai; imposto pelo compilador."
+            },
+            {
+              "term": "MVS",
+              "def": "Minimal Version Selection: algoritmo que escolhe a menor versão que satisfaz todos os requisitos do grafo de módulos."
+            },
+            {
+              "term": "go.work",
+              "def": "Arquivo de workspace que combina vários módulos locais sem alterar seus `go.mod`."
+            },
+            {
+              "term": "Diretiva tool",
+              "def": "Entrada do `go.mod` (Go 1.24) que fixa a versão de ferramentas executadas por `go tool`."
+            },
+            {
+              "term": "Type set",
+              "def": "Conjunto de tipos que uma constraint admite; define quais operações são válidas em `T`."
+            },
+            {
+              "term": "Alias genérico",
+              "def": "`type A[T any] = B[T]`: novo nome parametrizado para o mesmo tipo (Go 1.24)."
+            },
+            {
+              "term": "Table-driven test",
+              "def": "Teste que percorre uma tabela de casos, cada um num subteste `t.Run`."
+            },
+            {
+              "term": "synctest",
+              "def": "Pacote que roda testes numa bolha com relógio falso e espera determinística por goroutines."
+            },
+            {
+              "term": "ServeMux",
+              "def": "Roteador do `net/http`; desde o Go 1.22 aceita método e curingas `{id}`."
+            },
+            {
+              "term": "Slowloris",
+              "def": "Ataque que mantém conexões abertas enviando dados muito devagar para esgotar recursos."
+            },
+            {
+              "term": "slog",
+              "def": "Pacote `log/slog`: logging estruturado com handlers JSON e texto."
+            },
+            {
+              "term": "pprof",
+              "def": "Profiler da toolchain; CPU, heap, goroutines, mutex e block."
+            },
+            {
+              "term": "Escape analysis",
+              "def": "Análise do compilador que decide se um valor vive na pilha ou no heap."
+            },
+            {
+              "term": "GOGC",
+              "def": "Percentual de crescimento do heap sobre o live heap que dispara o próximo ciclo de GC."
+            },
+            {
+              "term": "GOMEMLIMIT",
+              "def": "Limite suave de memória do runtime; faz o GC coletar mais cedo perto do teto."
+            },
+            {
+              "term": "Distroless",
+              "def": "Imagens sem shell nem gerenciador de pacotes, apenas o necessário para executar o binário."
+            },
+            {
+              "term": "Informer",
+              "def": "Componente do client-go que mantém um cache local alimentado por list + watch."
+            },
+            {
+              "term": "Reconcile",
+              "def": "Função idempotente do controller que aproxima o estado real do desejado para uma chave."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Com esta parte a série de Go termina: fundamentos, concorrência e produção. Para consolidar, escolha um serviço pequeno e aplique o ciclo completo: layout enxuto, testes com `httptest`, timeouts, `slog`, métricas, perfil sob carga e imagem distroless."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Leia o código de controllers reais (cert-manager, Argo CD) para ver `Reconcile` em escala.",
+            "Siga para a **série de Kubernetes**: Deployments, probes, limites de recursos e o modelo de reconciliação que seu binário vai habitar.",
+            "Depois, a **série de Argo CD** e o tópico de GitOps, para entregar essa imagem com o Git como fonte da verdade.",
+            "Referências oficiais: go.dev/doc/modules/layout, go.dev/doc/gc-guide, go.dev/doc/diagnostics e as notas de release de cada versão."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Antes de cada upgrade de Go, leia as notas de release e rode `go vet`, `govulncheck` e a suíte com `-race`. O compromisso de compatibilidade do Go 1 torna a maioria das atualizações indolores.",
+          "title": "Mantenha-se atualizado"
+        }
+      ]
+    }
+  ]
+}

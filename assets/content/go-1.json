@@ -1,0 +1,1604 @@
+{
+  "id": "go-1",
+  "title": "Go 1 — Fundamentos da linguagem",
+  "summary": "Os fundamentos de Go: toolchain, tipos, slices, maps, structs, interfaces, erros e genéricos, com o modelo mental por trás de cada um.",
+  "category": "Linguagens",
+  "level": "Iniciante",
+  "minutes": 38,
+  "updated": "out 2026",
+  "tags": [
+    "go",
+    "golang",
+    "linguagem",
+    "programação",
+    "slices",
+    "maps",
+    "interfaces",
+    "erros",
+    "defer",
+    "generics",
+    "genéricos",
+    "módulos",
+    "go mod",
+    "iota"
+  ],
+  "series": "Go",
+  "part": 1,
+  "sections": [
+    {
+      "id": "filosofia",
+      "title": "Por que Go existe",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**Go** (ou Golang) nasceu no Google em 2007, desenhada por Robert Griesemer, Rob Pike e Ken Thompson, e foi aberta em 2009. O motivo não foi acadêmico: eles esperavam minutos por builds de C++ enquanto escreviam serviços de rede concorrentes. A linguagem é uma resposta a isso — **compilar rápido, ler fácil, rodar concorrente**."
+        },
+        {
+          "type": "p",
+          "text": "Go é compilada, estaticamente tipada, com coleta de lixo (GC) e uma biblioteca padrão grande. Ela abre mão de muitos recursos de propósito: não há herança, exceções, sobrecarga de funções, argumentos padrão nem operador ternário. O que sobra é um conjunto pequeno de conceitos que cabe na cabeça — a especificação da linguagem tem poucas dezenas de páginas."
+        },
+        {
+          "type": "h",
+          "text": "Princípios de design"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Simplicidade** — poucas formas de fazer a mesma coisa. Há um só laço (`for`), um só formatador (`gofmt`) e uma só forma de tratar erros (valores de retorno).",
+            "**Compilação rápida** — o grafo de dependências é explícito e sem ciclos, e o compilador não relê cabeçalhos. Projetos grandes compilam em segundos.",
+            "**Binário estático** — `go build` produz um único executável, sem JVM, interpretador ou `.so` obrigatórios. Copie o arquivo e rode.",
+            "**Composição em vez de herança** — comportamento é montado com structs embutidas e interfaces pequenas, satisfeitas implicitamente.",
+            "**Concorrência embutida** — goroutines e channels fazem parte da linguagem (assunto da Parte 2).",
+            "**Compatibilidade** — a promessa de compatibilidade do Go 1: código escrito para Go 1.0 continua compilando nas versões 1.x seguintes."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Onde Go brilha"
+        },
+        {
+          "type": "p",
+          "text": "Go virou a linguagem padrão da infraestrutura *cloud native*. **Docker**, **Kubernetes**, **Terraform**, **Argo CD**, **Prometheus**, **etcd**, **Caddy** e **CockroachDB** são escritos em Go. Os motivos se repetem: binário único fácil de empacotar em imagem mínima, cross-compilation trivial, bom desempenho com baixo consumo de memória e concorrência barata para servidores que atendem milhares de conexões."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Go é uma ótima escolha para CLIs, APIs, controllers/operators Kubernetes, proxies e ferramentas de infraestrutura. É menos indicada para interfaces gráficas, computação numérica pesada ou cenários que exigem controle manual de memória — aí C, C++ ou Rust costumam ser melhores.",
+          "title": "Quando não usar"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Aspecto",
+            "Go",
+            "Java/C#",
+            "Python/Node"
+          ],
+          "rows": [
+            [
+              "Execução",
+              "Código nativo compilado",
+              "Bytecode + JIT em VM",
+              "Interpretada"
+            ],
+            [
+              "Entrega",
+              "1 binário estático",
+              "JAR/DLL + runtime",
+              "Código + dependências"
+            ],
+            [
+              "Concorrência",
+              "Goroutines + channels",
+              "Threads / async",
+              "async / GIL"
+            ],
+            [
+              "Herança",
+              "Não (composição)",
+              "Sim",
+              "Sim"
+            ],
+            [
+              "Start-up",
+              "Milissegundos",
+              "Centenas de ms",
+              "Dezenas a centenas de ms"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "toolchain",
+      "title": "Toolchain: de código a binário",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A instalação do Go traz tudo em um único comando, `go`: compilar, testar, formatar, baixar dependências, analisar código. Não há Makefile, Maven ou npm separados."
+        },
+        {
+          "type": "diagram",
+          "title": "Pipeline de build",
+          "cols": 12,
+          "rows": 12.2,
+          "nodes": [
+            {
+              "id": "src",
+              "label": "Código-fonte",
+              "x": 0,
+              "y": 0.2,
+              "w": 5,
+              "h": 2,
+              "sub": ".go · go.mod"
+            },
+            {
+              "id": "cmp",
+              "label": "go build",
+              "x": 7,
+              "y": 0.2,
+              "w": 5,
+              "h": 2,
+              "sub": "compila + linka",
+              "variant": "accent"
+            },
+            {
+              "id": "rt",
+              "label": "Runtime + stdlib",
+              "x": 0,
+              "y": 4.4,
+              "w": 5,
+              "h": 2,
+              "sub": "GC · scheduler",
+              "variant": "muted"
+            },
+            {
+              "id": "bin",
+              "label": "Binário",
+              "x": 7,
+              "y": 4.4,
+              "w": 5,
+              "h": 2,
+              "sub": "estático, 1 arquivo"
+            },
+            {
+              "id": "t1",
+              "label": "linux/amd64",
+              "x": 0.2,
+              "y": 9.4,
+              "w": 3.6,
+              "h": 2
+            },
+            {
+              "id": "t2",
+              "label": "linux/arm64",
+              "x": 4.2,
+              "y": 9.4,
+              "w": 3.6,
+              "h": 2
+            },
+            {
+              "id": "t3",
+              "label": "darwin/arm64",
+              "x": 8.2,
+              "y": 9.4,
+              "w": 3.8,
+              "h": 2
+            }
+          ],
+          "edges": [
+            {
+              "from": "src",
+              "to": "cmp",
+              "label": "lê"
+            },
+            {
+              "from": "rt",
+              "to": "cmp",
+              "label": "embute",
+              "dashed": true
+            },
+            {
+              "from": "cmp",
+              "to": "bin",
+              "label": "gera",
+              "accent": true
+            },
+            {
+              "from": "bin",
+              "to": "t1"
+            },
+            {
+              "from": "bin",
+              "to": "t2"
+            },
+            {
+              "from": "bin",
+              "to": "t3"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Mesmo código, vários GOOS/GOARCH",
+              "x": 0,
+              "y": 8,
+              "w": 12,
+              "h": 4.2
+            }
+          ],
+          "caption": "O runtime (GC, scheduler) e a biblioteca padrão são linkados dentro do executável. Trocar de plataforma é só mudar duas variáveis de ambiente."
+        },
+        {
+          "type": "h",
+          "text": "Comandos do dia a dia"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Comando",
+            "Faz o quê"
+          ],
+          "rows": [
+            [
+              "`go mod init <caminho>`",
+              "Cria o `go.mod` (inicia um módulo)"
+            ],
+            [
+              "`go run .`",
+              "Compila em diretório temporário e executa"
+            ],
+            [
+              "`go build ./...`",
+              "Compila tudo; `-o` define o nome da saída"
+            ],
+            [
+              "`go test ./...`",
+              "Roda testes de todos os pacotes"
+            ],
+            [
+              "`go vet ./...`",
+              "Análise estática: printf errado, cópia de lock, etc."
+            ],
+            [
+              "`gofmt -w .` / `go fmt ./...`",
+              "Formata o código (estilo único, inegociável)"
+            ],
+            [
+              "`go mod tidy`",
+              "Adiciona o que falta e remove o que sobra no go.mod/go.sum"
+            ],
+            [
+              "`go install pkg@versão`",
+              "Compila e instala um comando em `$GOBIN`"
+            ],
+            [
+              "`go doc fmt.Println`",
+              "Documentação no terminal"
+            ]
+          ]
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Crie o módulo",
+              "text": "`go mod init exemplo.com/ola` gera o `go.mod` com o caminho do módulo e a versão mínima de Go."
+            },
+            {
+              "title": "Escreva o `main.go`",
+              "text": "Pacote `main` com a função `main()` é o ponto de entrada de um executável."
+            },
+            {
+              "title": "Rode e compile",
+              "text": "`go run .` para iterar; `go build -o ola .` para gerar o binário final."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "mkdir ola && cd ola\ngo mod init exemplo.com/ola"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Olá, Go!\")\n}",
+          "file": "main.go"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "go run .\ngo build -o ola . && ./ola\nfile ola    # ELF 64-bit ... statically linked"
+        },
+        {
+          "type": "h",
+          "text": "go.mod, go.sum e a diretiva toolchain"
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "module exemplo.com/ola\n\ngo 1.24\n\ntoolchain go1.24.3\n\nrequire github.com/google/uuid v1.6.0\n\n// Go 1.24+: ferramentas de desenvolvimento versionadas\ntool golang.org/x/tools/cmd/stringer",
+          "file": "go.mod"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`module` — o caminho de import do módulo; por convenção a URL do repositório.",
+            "`go` — versão **mínima** de linguagem. Ela também liga/desliga comportamentos: com `go 1.22` ou maior, cada iteração de `for` tem sua própria variável.",
+            "`toolchain` — sugere a versão exata do compilador. Com `GOTOOLCHAIN=auto` (padrão), o `go` baixa e usa a toolchain pedida se a sua for mais velha (desde o Go 1.21).",
+            "`tool` — (Go 1.24) declara ferramentas rodadas com `go tool <nome>`, substituindo o antigo truque do arquivo `tools.go`.",
+            "`go.sum` — hashes criptográficos de cada versão de dependência. É verificado contra o banco público `sum.golang.org`, o que detecta adulteração. **Versione o go.sum**."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Go usa *Minimal Version Selection*: entre as versões exigidas por todos os módulos, escolhe a **menor** que satisfaz todos. Não existe \"latest\" implícito, então builds são reproduzíveis sem lockfile separado.",
+          "title": "Dependências previsíveis"
+        },
+        {
+          "type": "h",
+          "text": "Cross-compilation e binários estáticos"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \\\n  go build -trimpath -ldflags=\"-s -w\" -o bin/ola-arm64 .\n\nGOOS=windows GOARCH=amd64 go build -o ola.exe .\ngo tool dist list    # todas as combinações suportadas"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`CGO_ENABLED=0` garante um binário 100% estático (sem libc); ideal para imagens `scratch` ou distroless.",
+            "`-trimpath` remove caminhos locais do binário; `-ldflags=\"-s -w\"` tira tabela de símbolos e DWARF, encolhendo o arquivo.",
+            "Não há emulador nem SDK extra: o compilador já é um cross-compiler."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pacotes",
+      "title": "Módulos, pacotes e visibilidade",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um **módulo** é a unidade de versionamento (um `go.mod`). Um **pacote** é a unidade de compilação: todos os arquivos `.go` de um diretório que declaram o mesmo `package`. Um módulo contém vários pacotes."
+        },
+        {
+          "type": "code",
+          "lang": "tree",
+          "code": "ola/\n├── go.mod\n├── cmd/\n│   └── ola/\n│       └── main.go          # package main\n├── internal/\n│   └── saudacao/\n│       └── saudacao.go      # só importável dentro do módulo\n└── pkg/\n    └── texto/\n        └── texto.go         # API pública reutilizável"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package saudacao\n\nimport \"fmt\"\n\n// Mensagem é exportada (inicial maiúscula).\nfunc Mensagem(nome string) string {\n\treturn fmt.Sprintf(\"%s, %s!\", prefixo(), nome)\n}\n\n// prefixo não é exportada: invisível fora do pacote.\nfunc prefixo() string { return \"Olá\" }",
+          "file": "internal/saudacao/saudacao.go"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\n\t\"exemplo.com/ola/internal/saudacao\"\n)\n\nfunc main() {\n\tfmt.Println(saudacao.Mensagem(\"Ana\"))\n}",
+          "file": "cmd/ola/main.go"
+        },
+        {
+          "type": "h",
+          "text": "Regras que valem decorar"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Visibilidade pela capitalização**: identificador iniciado em maiúscula (`Mensagem`, `Config`) é exportado; em minúscula é privado ao pacote. Vale para funções, tipos, campos, métodos e constantes. Não há `public`/`private`.",
+            "**`internal/`** é imposto pelo toolchain: só código sob o diretório pai de `internal` pode importá-lo. É o jeito idiomático de ter API privada.",
+            "**Import não usado é erro de compilação**, assim como variável local não usada. Use `_` para descartar: `import _ \"embed\"` ou `_, err := f()`.",
+            "**Sem imports circulares**. Se A importa B, B não pode importar A. Isso força camadas limpas e é uma das razões da compilação rápida.",
+            "O nome do pacote é o último elemento do caminho por convenção, curto e em minúsculas, sem `_` nem maiúsculas.",
+            "**Módulos v2+**: a partir da major 2, o caminho ganha sufixo: `github.com/org/lib/v2`."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func init() {          // roda antes de main, uma vez por pacote\n\tregistrarDrivers()\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Evite abusar de `init()` e de estado global: dificultam testes e a ordem de inicialização fica implícita. Prefira construtores explícitos (`NewServer(cfg)`).",
+          "title": "init() com moderação"
+        }
+      ]
+    },
+    {
+      "id": "tipos",
+      "title": "Tipos, valores zero, constantes e strings",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Go é estaticamente tipada e **não faz conversões implícitas** entre tipos numéricos: `int` + `int64` não compila. Isso evita uma classe inteira de bugs, ao custo de alguns `int64(x)`."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Categoria",
+            "Tipos",
+            "Notas"
+          ],
+          "rows": [
+            [
+              "Inteiros",
+              "`int`, `int8..int64`, `uint..uint64`, `uintptr`",
+              "`int` tem 64 bits em plataformas 64-bit; estouro dá volta (wrap), sem panic"
+            ],
+            [
+              "Ponto flutuante",
+              "`float32`, `float64`",
+              "IEEE 754; use `float64` por padrão"
+            ],
+            [
+              "Complexos",
+              "`complex64`, `complex128`",
+              "Raramente usados"
+            ],
+            [
+              "Booleano",
+              "`bool`",
+              "Sem conversão de/para inteiro"
+            ],
+            [
+              "Texto",
+              "`string`, `byte` (=`uint8`), `rune` (=`int32`)",
+              "String é imutável"
+            ],
+            [
+              "Compostos",
+              "array, slice, map, struct, ponteiro, func, channel, interface",
+              "Seções seguintes"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Declarando variáveis"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var n int            // zero value: 0\nvar nome = \"Go\"      // tipo inferido: string\nidade := 30          // curta: só dentro de funções\na, b := 1, 2.5       // várias de uma vez\nconst Pi = 3.14159   // constante (untyped)"
+        },
+        {
+          "type": "p",
+          "text": "Toda variável é inicializada com o **valor zero** do seu tipo. Não existe \"não inicializado\" nem lixo de memória. Projetar tipos cujo valor zero já é útil (como `sync.Mutex` ou `bytes.Buffer`) é um idioma central de Go."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Tipo",
+            "Valor zero"
+          ],
+          "rows": [
+            [
+              "`int`, `float64`",
+              "`0`"
+            ],
+            [
+              "`bool`",
+              "`false`"
+            ],
+            [
+              "`string`",
+              "`\"\"` (vazia)"
+            ],
+            [
+              "ponteiro, slice, map, func, channel, interface",
+              "`nil`"
+            ],
+            [
+              "struct",
+              "cada campo no seu valor zero"
+            ]
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Constantes e iota"
+        },
+        {
+          "type": "p",
+          "text": "Constantes são avaliadas em tempo de compilação e podem ser *untyped*: `const Pi = 3.14159` serve para `float32` e `float64`. Para enumerações, use `iota`, um contador que reinicia em 0 a cada bloco `const` e incrementa a cada linha."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Dia int\n\nconst (\n\tDomingo Dia = iota // 0\n\tSegunda            // 1\n\tTerca              // 2\n)\n\nconst (\n\t_  = iota             // descarta 0\n\tKB = 1 << (10 * iota) // 1 << 10\n\tMB                    // 1 << 20\n\tGB                    // 1 << 30\n)\n\nfunc (d Dia) String() string {\n\treturn [...]string{\"dom\", \"seg\", \"ter\"}[d]\n}"
+        },
+        {
+          "type": "p",
+          "text": "Implementar `String() string` faz o tipo ser impresso de forma legível por `fmt` (é a interface `fmt.Stringer`)."
+        },
+        {
+          "type": "h",
+          "text": "`:=` vs `var` e o perigo do shadowing"
+        },
+        {
+          "type": "p",
+          "text": "`:=` declara **e** atribui, exigindo ao menos uma variável nova do lado esquerdo. Em um bloco interno, ele declara uma variável **nova** que oculta (*shadows*) a de fora — fonte clássica de bugs silenciosos."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func carregar() error {\n\tvar cfg *Config\n\tvar err error\n\tif usarArquivo {\n\t\tcfg, err := lerArquivo() // BUG: novos cfg e err!\n\t\t_ = cfg\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n\treturn validar(cfg)          // cfg continua nil\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Corrija atribuindo com `=` (`cfg, err = lerArquivo()`), ou reestruturando o código. O `go vet` não pega shadowing por padrão, mas o analisador `shadow` (`golang.org/x/tools`) e linters como `golangci-lint` pegam.",
+          "title": "Shadowing"
+        },
+        {
+          "type": "h",
+          "text": "Strings, bytes e runes"
+        },
+        {
+          "type": "p",
+          "text": "Uma `string` é uma sequência **imutável de bytes**, convencionalmente UTF-8. `len(s)` conta **bytes**, não caracteres. Um `rune` é um *code point* Unicode (alias de `int32`). `range` sobre string decodifica UTF-8 e entrega runes."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "s := \"olá, 世界\"\nfmt.Println(len(s))           // 12 bytes\nfmt.Println(len([]rune(s)))   // 7 caracteres\n\nfor i, r := range \"olá\" {     // i = índice em BYTES\n\tfmt.Printf(\"%d:%c \", i, r) // 0:o 1:l 2:á\n}\n\nb := []byte(s)                // cópia mutável\nb[0] = 'O'\ns2 := string(b)               // outra cópia"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`s[i]` devolve um **byte**, não um caractere; fatiar `s[0:2]` pode cortar um rune ao meio.",
+            "Concatenar em laço com `+=` é O(n²). Use `strings.Builder`.",
+            "Bytes inválidos em UTF-8 viram `U+FFFD` no `range`. Para normalizar/validar, veja `unicode/utf8`.",
+            "Pacotes úteis: `strings`, `strconv` (`Atoi`, `ParseFloat`), `unicode`, `bytes`."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var sb strings.Builder\nfor i := range 3 {\n\tfmt.Fprintf(&sb, \"item-%d;\", i)\n}\nfmt.Println(sb.String()) // item-0;item-1;item-2;"
+        }
+      ]
+    },
+    {
+      "id": "fluxo",
+      "title": "Funções e controle de fluxo",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "Funções"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func dividir(a, b float64) (float64, error) {\n\tif b == 0 {\n\t\treturn 0, errors.New(\"divisão por zero\")\n\t}\n\treturn a / b, nil\n}\n\nfunc soma(nums ...int) (total int) { // variádica + retorno nomeado\n\tfor _, n := range nums {\n\t\ttotal += n\n\t}\n\treturn\n}\n\ncontador := func() func() int { // closure\n\tc := 0\n\treturn func() int { c++; return c }\n}()"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Funções são valores de primeira classe e podem retornar **múltiplos valores** — a base do tratamento de erros.",
+            "Argumentos são sempre passados **por valor** (copiados). Slices, maps, channels e funcs copiam apenas o cabeçalho/referência interna; por isso parecem \"por referência\".",
+            "Retornos nomeados documentam o resultado e permitem que `defer` os altere, mas evite o `return` \"pelado\" em funções longas."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "for: o único laço"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "for i := 0; i < 3; i++ { }        // clássico\nfor cond { }                      // estilo while\nfor { break }                     // infinito\nfor i, v := range []string{\"a\"} { // slice/array/string/map/channel\n\t_, _ = i, v\n}\nfor i := range 3 { _ = i }        // Go 1.22: range sobre inteiro"
+        },
+        {
+          "type": "p",
+          "text": "Desde o **Go 1.22**, cada iteração de um `for` de três cláusulas cria uma variável nova (se o `go.mod` declara `go 1.22` ou maior). Isso eliminou o bug clássico de closures e goroutines capturando a mesma variável de laço."
+        },
+        {
+          "type": "h",
+          "text": "Range sobre funções (iteradores)"
+        },
+        {
+          "type": "p",
+          "text": "O **Go 1.23** permitiu `range` sobre funções. Um iterador é uma função que recebe um `yield`; `iter.Seq[V]` e `iter.Seq2[K, V]` dão nome a esses formatos. O compilador transforma o corpo do `for` no `yield`, e `break` simplesmente faz `yield` retornar `false`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func Contar(n int) iter.Seq[int] {\n\treturn func(yield func(int) bool) {\n\t\tfor i := 0; i < n; i++ {\n\t\t\tif !yield(i) {\n\t\t\t\treturn // o chamador deu break\n\t\t\t}\n\t\t}\n\t}\n}\n\nfor i := range Contar(10) {\n\tif i == 3 {\n\t\tbreak\n\t}\n\tfmt.Print(i, \" \") // 0 1 2\n}"
+        },
+        {
+          "type": "p",
+          "text": "A stdlib já usa isso: `slices.Values`, `maps.Keys`, `slices.Sorted(maps.Keys(m))`, `slices.Collect`, `strings.SplitSeq` (Go 1.24). Iteradores evitam alocar slices intermediários e permitem sequências preguiçosas ou infinitas."
+        },
+        {
+          "type": "h",
+          "text": "switch"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "switch hoje := time.Now().Weekday(); {\ncase hoje == time.Saturday, hoje == time.Sunday:\n\tfmt.Println(\"descanso\")\ncase hoje == time.Friday:\n\tfmt.Println(\"deploy proibido\")\n\tfallthrough // raro: cai explicitamente no próximo\ndefault:\n\tfmt.Println(\"trabalho\")\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Cada `case` **encerra sozinho** — não existe o `break` obrigatório de C. `fallthrough` é opt-in.",
+            "O `switch` sem expressão (*tagless*) substitui cadeias de `if/else if`.",
+            "Cases aceitam listas (`case 1, 2, 3:`) e expressões arbitrárias."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "defer"
+        },
+        {
+          "type": "p",
+          "text": "`defer` agenda uma chamada para rodar quando a função **retorna** (normalmente ou por panic). É a forma idiomática de liberar recursos junto de onde foram adquiridos."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "f, err := os.Open(nome)\nif err != nil {\n\treturn err\n}\ndefer f.Close() // roda ao sair da função, não do bloco\n\nfor i := 0; i < 3; i++ {\n\tdefer fmt.Print(i, \" \") // imprime: 2 1 0\n}"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Argumentos são avaliados na hora do defer",
+              "text": "`defer fmt.Println(x)` captura o valor de `x` **naquele instante**, não quando a função terminar. Para ver o valor final, use uma closure: `defer func() { fmt.Println(x) }()`."
+            },
+            {
+              "title": "Ordem LIFO",
+              "text": "Defers executam em ordem inversa à declaração, como uma pilha — liberando recursos na ordem oposta da aquisição."
+            },
+            {
+              "title": "Escopo de função",
+              "text": "Um `defer` dentro de um laço só roda quando a **função** acaba. Em laços longos abrindo arquivos, isole o corpo em uma função auxiliar."
+            },
+            {
+              "title": "Pode alterar retornos nomeados",
+              "text": "Como roda depois do `return` calcular o valor, um defer com closure pode modificar o resultado nomeado (padrão usado para converter panics em erros)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "slices-maps",
+      "title": "Arrays, slices e maps",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "Arrays: tamanho faz parte do tipo"
+        },
+        {
+          "type": "p",
+          "text": "Um array tem tamanho fixo e é **valor**: `[3]int` e `[4]int` são tipos diferentes e atribuir ou passar um array copia todos os elementos. Por isso raramente se usa array diretamente — o dia a dia é com **slices**."
+        },
+        {
+          "type": "h",
+          "text": "Slices: uma janela sobre um array"
+        },
+        {
+          "type": "p",
+          "text": "Um slice é um pequeno cabeçalho de **três palavras** (24 bytes em 64-bit): ponteiro para o primeiro elemento visível, comprimento (`len`) e capacidade (`cap`). Os dados vivem em um array subjacente que pode ser compartilhado por vários slices."
+        },
+        {
+          "type": "diagram",
+          "title": "Anatomia de um slice",
+          "cols": 12,
+          "rows": 10.2,
+          "nodes": [
+            {
+              "id": "ptr",
+              "label": "ptr",
+              "x": 0.3,
+              "y": 1.1,
+              "w": 3.4,
+              "h": 1.8,
+              "sub": "aponta p/ [0]",
+              "variant": "accent"
+            },
+            {
+              "id": "len",
+              "label": "len = 3",
+              "x": 4.3,
+              "y": 1.1,
+              "w": 3.4,
+              "h": 1.8,
+              "sub": "visíveis"
+            },
+            {
+              "id": "cap",
+              "label": "cap = 6",
+              "x": 8.3,
+              "y": 1.1,
+              "w": 3.4,
+              "h": 1.8,
+              "sub": "até o fim"
+            },
+            {
+              "id": "c0",
+              "label": "10",
+              "x": 0.5,
+              "y": 6.6,
+              "w": 1.5,
+              "h": 1.8,
+              "variant": "accent"
+            },
+            {
+              "id": "c1",
+              "label": "20",
+              "x": 2.2,
+              "y": 6.6,
+              "w": 1.5,
+              "h": 1.8,
+              "variant": "accent"
+            },
+            {
+              "id": "c2",
+              "label": "30",
+              "x": 3.9,
+              "y": 6.6,
+              "w": 1.5,
+              "h": 1.8,
+              "variant": "accent"
+            },
+            {
+              "id": "c3",
+              "label": "0",
+              "x": 5.6,
+              "y": 6.6,
+              "w": 1.5,
+              "h": 1.8,
+              "variant": "muted"
+            },
+            {
+              "id": "c4",
+              "label": "0",
+              "x": 7.3,
+              "y": 6.6,
+              "w": 1.5,
+              "h": 1.8,
+              "variant": "muted"
+            },
+            {
+              "id": "c5",
+              "label": "0",
+              "x": 9.0,
+              "y": 6.6,
+              "w": 1.5,
+              "h": 1.8,
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "ptr",
+              "to": "c0",
+              "accent": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Cabeçalho do slice s (24 bytes)",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 3.6
+            },
+            {
+              "label": "Array subjacente (6 elementos)",
+              "x": 0,
+              "y": 5.2,
+              "w": 12,
+              "h": 4.8
+            }
+          ],
+          "caption": "s := make([]int, 3, 6). Os 3 primeiros elementos fazem parte de s; os outros 3 existem na memória e podem ser alcançados por reslice ou append."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "s := make([]int, 3, 6)    // len 3, cap 6\ns = append(s, 4)          // cabe: reutiliza o array\nt := s[1:3]               // len 2, cap 5, MESMO array\nt[0] = 99                 // altera s[1] também!\nu := s[1:3:3]             // full slice: cap limitada a 2\nu = append(u, 7)          // força cópia; s não é afetado\n\ndst := make([]int, len(s))\nn := copy(dst, s)         // copia min(len) elementos"
+        },
+        {
+          "type": "h",
+          "text": "append, crescimento e aliasing"
+        },
+        {
+          "type": "p",
+          "text": "`append` devolve um slice. Se `len < cap`, escreve no array existente; senão aloca um array maior, copia e retorna um slice apontando para o **novo** array. O fator é 2x até 256 elementos e vai suavizando para ~1,25x depois (a fórmula atual é `newcap += (newcap + 3*256) / 4`), arredondando para tamanhos do alocador de memória."
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Capacidade ao anexar elementos",
+          "xLabel": "elementos (len)",
+          "yLabel": "CAP",
+          "yMax": 2000,
+          "series": [
+            {
+              "name": "len",
+              "tone": "muted",
+              "dashed": true,
+              "points": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  1300,
+                  1300
+                ]
+              ]
+            },
+            {
+              "name": "cap de []int",
+              "tone": "primary",
+              "points": [
+                [
+                  1,
+                  4
+                ],
+                [
+                  5,
+                  8
+                ],
+                [
+                  9,
+                  16
+                ],
+                [
+                  17,
+                  32
+                ],
+                [
+                  33,
+                  64
+                ],
+                [
+                  65,
+                  128
+                ],
+                [
+                  129,
+                  256
+                ],
+                [
+                  257,
+                  512
+                ],
+                [
+                  513,
+                  848
+                ],
+                [
+                  849,
+                  1280
+                ],
+                [
+                  1281,
+                  1792
+                ],
+                [
+                  1300,
+                  1792
+                ]
+              ]
+            }
+          ],
+          "caption": "Valores medidos com append de um elemento por vez em []int (Go 1.2x). São aproximados: variam entre versões e tipos de elemento, pois dependem das classes de tamanho do alocador. O ritmo vai de 2x para ~1,25x."
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Como `append` pode ou não realocar, dois slices podem passar a compartilhar (ou deixar de compartilhar) memória sem aviso. Se `b := a[:2]; b = append(b, 99)` e `cap(b) > 2`, o `99` sobrescreve `a[2]`. Sempre use o retorno: `s = append(s, x)`; ao devolver sub-slices de dados que o chamador não deve alterar, use `s[a:b:b]` ou `slices.Clone`.",
+          "title": "Aliasing"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "a := []int{1, 2, 3, 4}\nb := a[:2]\nb = append(b, 99)   // cap(b)=4: sobrescreve a[2]\nfmt.Println(a, b)   // [1 2 99 4] [1 2 99]\n\nb = append(b, 1, 2, 3) // estourou cap: novo array\nb[0] = -1\nfmt.Println(a, b)   // a intacto: [1 2 99 4]"
+        },
+        {
+          "type": "p",
+          "text": "Pré-aloque quando souber o tamanho: `make([]T, 0, n)` evita realocações. Slice `nil` e slice vazio (`[]int{}`) têm `len == 0` e funcionam igual com `append` e `range`; só diferem em `== nil` (e na saída JSON: `null` vs `[]`)."
+        },
+        {
+          "type": "h",
+          "text": "O pacote slices"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "xs := []int{3, 1, 2}\nslices.Sort(xs)                     // [1 2 3]\ni, ok := slices.BinarySearch(xs, 2) // 1 true\nslices.Contains(xs, 5)              // false\nslices.Index(xs, 3)                 // 2\nslices.Reverse(xs)                  // [3 2 1]\nys := slices.Clone(xs)              // cópia independente\nxs = slices.Delete(xs, 0, 1)        // remove xs[0]\nslices.SortFunc(pessoas, func(a, b Pessoa) int {\n\treturn cmp.Compare(a.Idade, b.Idade)\n})"
+        },
+        {
+          "type": "h",
+          "text": "Maps"
+        },
+        {
+          "type": "p",
+          "text": "`map[K]V` é uma tabela hash (desde o Go 1.24, baseada em *Swiss Tables*). A chave deve ser **comparável** (`==`): números, strings, bools, ponteiros, structs e arrays de comparáveis — mas não slices, maps ou funções."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "idades := map[string]int{\"ana\": 30}\nidades[\"bia\"] = 25\nv, ok := idades[\"caio\"] // ok = false, v = 0 (zero value)\ndelete(idades, \"ana\")   // seguro mesmo se não existir\n\nvar m map[string]int    // nil map\n_ = m[\"x\"]              // leitura OK: devolve 0\nm[\"x\"] = 1              // PANIC: assignment to nil map\n\nfor k, v := range idades { _, _ = k, v } // ordem ALEATÓRIA\nchaves := slices.Sorted(maps.Keys(idades))"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Ordem de iteração não é definida** e é propositalmente randomizada. Ordene as chaves se precisar de saída estável.",
+            "Use o idioma *comma ok* (`v, ok := m[k]`) para distinguir ausente de valor zero.",
+            "Maps **não são seguros para uso concorrente**: escrita simultânea derruba o programa com `fatal error: concurrent map writes` (veja Parte 2).",
+            "Um set idiomático: `map[string]struct{}` (o `struct{}` ocupa 0 bytes).",
+            "Pacote `maps`: `Clone`, `Copy`, `DeleteFunc`, `Keys`, `Values`, `Equal`. Também existe o builtin `clear(m)`."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "structs",
+      "title": "Structs, métodos e embedding",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Go não tem classes. Você declara **structs** (dados) e associa **métodos** a qualquer tipo definido no mesmo pacote."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Pessoa struct {\n\tNome  string `json:\"nome\"`\n\tIdade int    `json:\"idade,omitempty\"`\n\temail string // privado ao pacote\n}\n\nfunc NewPessoa(nome string, idade int) *Pessoa {\n\treturn &Pessoa{Nome: nome, Idade: idade}\n}\n\nfunc (p Pessoa) Apresentar() string { // receptor por valor\n\treturn fmt.Sprintf(\"%s (%d)\", p.Nome, p.Idade)\n}\n\nfunc (p *Pessoa) Aniversario() { // receptor por ponteiro\n\tp.Idade++\n}"
+        },
+        {
+          "type": "p",
+          "text": "As *struct tags* entre crases são metadados lidos por reflexão — `encoding/json` as usa para nomear campos. Sempre inicialize com campos nomeados (`Pessoa{Nome: \"Ana\"}`): inicialização posicional quebra quando o struct ganha campos."
+        },
+        {
+          "type": "h",
+          "text": "Ponteiros"
+        },
+        {
+          "type": "p",
+          "text": "`&x` obtém o endereço, `*p` desreferencia. Não há aritmética de ponteiros. `p.Campo` desreferencia automaticamente. Ponteiros servem para (1) mutar o original, (2) evitar copiar structs grandes e (3) representar ausência com `nil`."
+        },
+        {
+          "type": "h",
+          "text": "Receptor por valor ou por ponteiro?"
+        },
+        {
+          "type": "p",
+          "text": "O receptor por valor recebe uma **cópia** — mudanças nela somem. O por ponteiro enxerga o original. Isso define o **method set** do tipo, que decide quais interfaces ele satisfaz:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Tipo",
+            "Method set contém",
+            "Observação"
+          ],
+          "rows": [
+            [
+              "`T`",
+              "métodos com receptor `T`",
+              "Não inclui os de `*T`"
+            ],
+            [
+              "`*T`",
+              "métodos com receptor `T` **e** `*T`",
+              "Superconjunto"
+            ],
+            [
+              "variável `x` de tipo `T`",
+              "`x.Aniversario()` funciona",
+              "O compilador converte para `(&x).Aniversario()` se `x` for endereçável"
+            ],
+            [
+              "valor em map ou retorno de função",
+              "não é endereçável",
+              "`m[k].Aniversario()` não compila"
+            ]
+          ]
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use **ponteiro** se o método muta o receptor, se o struct é grande ou contém um `sync.Mutex` (que não pode ser copiado).",
+            "**Não misture** receptores de valor e ponteiro no mesmo tipo: confunde e muda method sets.",
+            "Tipos pequenos e imutáveis (`time.Time`, `Point`) combinam com receptor por valor."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Embedding: composição"
+        },
+        {
+          "type": "p",
+          "text": "Um campo sem nome, apenas com o tipo, **embute** esse tipo: seus campos e métodos são *promovidos* para o externo. Não é herança — não há polimorfismo por subtipo; o embutido não sabe que está embutido."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Animal struct{ Nome string }\n\nfunc (a Animal) Falar() string { return a.Nome + \" faz barulho\" }\n\ntype Cachorro struct {\n\tAnimal        // embutido\n\tRaca   string\n}\n\nfunc (c Cachorro) Falar() string { // sobrescreve (shadow)\n\treturn c.Nome + \" faz au au; \" + c.Animal.Falar()\n}\n\nd := Cachorro{Animal{\"Rex\"}, \"SRD\"}\nfmt.Println(d.Nome, d.Falar()) // Nome promovido"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Embutir uma **interface** em um struct é um truque comum para decorar ou fazer *mocks*: o struct satisfaz a interface inteira e você sobrescreve só o método que interessa.",
+          "title": "Decorator barato"
+        }
+      ]
+    },
+    {
+      "id": "interfaces",
+      "title": "Interfaces",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Uma interface é um conjunto de métodos. Em Go, a satisfação é **implícita**: um tipo implementa a interface simplesmente por ter os métodos — sem `implements`. Isso inverte a dependência: quem **consome** define a interface, e o produtor nem precisa conhecê-la."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Reader interface {\n\tRead(p []byte) (n int, err error)\n}\n\ntype Writer interface {\n\tWrite(p []byte) (n int, err error)\n}\n\n// io.Copy funciona com QUALQUER Reader e Writer:\nn, err := io.Copy(os.Stdout, strings.NewReader(\"oi\\n\"))"
+        },
+        {
+          "type": "p",
+          "text": "`io.Reader` e `io.Writer` são o exemplo de ouro: arquivos, sockets, buffers, respostas HTTP e compressores os implementam, e dezenas de funções compõem com eles. Provérbio Go: *\"quanto maior a interface, mais fraca a abstração\"*. Prefira interfaces de 1 a 3 métodos, definidas **no pacote consumidor**, e aceite interfaces/retorne structs."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "// Garantia em tempo de compilação de que *Arquivo é um Writer:\nvar _ io.Writer = (*Arquivo)(nil)"
+        },
+        {
+          "type": "h",
+          "text": "Por dentro: (tipo, valor)"
+        },
+        {
+          "type": "p",
+          "text": "Um valor de interface guarda **dois ponteiros**: um para a informação do tipo dinâmico concreto e outro para o dado. A interface só é `nil` quando **ambos** são nil. Aí mora a armadilha mais famosa da linguagem."
+        },
+        {
+          "type": "diagram",
+          "title": "Interface nil vs. nil dentro de interface",
+          "cols": 12,
+          "rows": 9.0,
+          "nodes": [
+            {
+              "id": "ta",
+              "label": "tipo",
+              "x": 0.4,
+              "y": 1.4,
+              "w": 2.4,
+              "h": 1.8,
+              "sub": "nil"
+            },
+            {
+              "id": "va",
+              "label": "valor",
+              "x": 3.0,
+              "y": 1.4,
+              "w": 2.4,
+              "h": 1.8,
+              "sub": "nil"
+            },
+            {
+              "id": "tb",
+              "label": "tipo",
+              "x": 6.6,
+              "y": 1.4,
+              "w": 2.4,
+              "h": 1.8,
+              "sub": "*MyErr",
+              "variant": "accent"
+            },
+            {
+              "id": "vb",
+              "label": "valor",
+              "x": 9.2,
+              "y": 1.4,
+              "w": 2.4,
+              "h": 1.8,
+              "sub": "nil ptr"
+            },
+            {
+              "id": "ra",
+              "label": "err == nil",
+              "x": 0.4,
+              "y": 6.4,
+              "w": 5.2,
+              "h": 2.2,
+              "sub": "true",
+              "variant": "muted"
+            },
+            {
+              "id": "rb",
+              "label": "err == nil",
+              "x": 6.4,
+              "y": 6.4,
+              "w": 5.4,
+              "h": 2.2,
+              "sub": "FALSE",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "ta",
+              "to": "ra"
+            },
+            {
+              "from": "tb",
+              "to": "rb",
+              "accent": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "var err error = nil",
+              "x": 0,
+              "y": 0,
+              "w": 6,
+              "h": 4.4
+            },
+            {
+              "label": "err = (*MyErr)(nil)",
+              "x": 6.2,
+              "y": 0,
+              "w": 5.8,
+              "h": 4.4
+            }
+          ],
+          "caption": "A segunda interface tem tipo dinâmico *MyErr, então não é nil, mesmo que o ponteiro dentro dela seja."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type MyErr struct{ Code int }\n\nfunc (e *MyErr) Error() string { return \"falhou\" }\n\nfunc operar() error {\n\tvar p *MyErr // nil\n\t// ... nada deu errado ...\n\treturn p // BUG: devolve error != nil\n}\n\nif err := operar(); err != nil { // verdadeiro!\n\tfmt.Println(\"erro?!\", err)\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Nunca retorne um ponteiro concreto nulo como `error` (ou qualquer interface). Retorne o literal `nil` explicitamente: `return nil`. Declare variáveis de erro com o tipo `error`, não `*MyErr`.",
+          "title": "A armadilha do nil tipado"
+        },
+        {
+          "type": "h",
+          "text": "Type assertion, type switch e any"
+        },
+        {
+          "type": "p",
+          "text": "`any` é apenas um alias de `interface{}` (a interface vazia, satisfeita por todos). Para recuperar o tipo concreto use *type assertion*; para vários casos, *type switch*."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var x any = \"texto\"\n\ns, ok := x.(string) // forma segura\nif !ok { /* não era string */ }\n_ = x.(int)         // sem ok: PANIC se não for int\n\nswitch v := x.(type) {\ncase int:\n\tfmt.Println(\"int\", v+1)\ncase string, []byte:\n\tfmt.Printf(\"texto-like %v\\n\", v)\ncase nil:\n\tfmt.Println(\"nil\")\ncase fmt.Stringer:\n\tfmt.Println(v.String())\ndefault:\n\tfmt.Printf(\"outro: %T\\n\", v)\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "`error` e `fmt.Stringer` são interfaces onipresentes. Use `any` com parcimônia: você perde a verificação de tipos do compilador. Desde o Go 1.18, genéricos resolvem muitos casos onde antes se usava `any`.",
+          "title": "any e segurança de tipos"
+        }
+      ]
+    },
+    {
+      "id": "erros",
+      "title": "Erros como valores",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Go não tem exceções para fluxo normal. Uma função que pode falhar devolve um `error` como último retorno, e o chamador decide o que fazer. `error` é só uma interface com um método: `Error() string`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "f, err := os.Open(\"config.yaml\")\nif err != nil {\n\treturn fmt.Errorf(\"abrindo config: %w\", err)\n}\ndefer f.Close()"
+        },
+        {
+          "type": "p",
+          "text": "É verboso de propósito: cada ponto de falha fica visível na leitura, e o erro ganha contexto à medida que sobe a pilha. O `%w` do `fmt.Errorf` **embrulha** o erro original, preservando a cadeia."
+        },
+        {
+          "type": "diagram",
+          "title": "Cadeia de erros embrulhados",
+          "cols": 12,
+          "rows": 14.2,
+          "nodes": [
+            {
+              "id": "e1",
+              "label": "handler: ...",
+              "x": 0,
+              "y": 0.2,
+              "w": 5.6,
+              "h": 2,
+              "sub": "*fmt.wrapError"
+            },
+            {
+              "id": "e2",
+              "label": "service: ...",
+              "x": 0,
+              "y": 4.2,
+              "w": 5.6,
+              "h": 2,
+              "sub": "*fmt.wrapError"
+            },
+            {
+              "id": "e3",
+              "label": "repo: ...",
+              "x": 0,
+              "y": 8.2,
+              "w": 5.6,
+              "h": 2,
+              "sub": "*fmt.wrapError"
+            },
+            {
+              "id": "e4",
+              "label": "ErrNotFound",
+              "x": 0,
+              "y": 12.2,
+              "w": 5.6,
+              "h": 2,
+              "sub": "errors.New",
+              "variant": "accent"
+            },
+            {
+              "id": "is",
+              "label": "errors.Is",
+              "x": 7.4,
+              "y": 6.2,
+              "w": 4.6,
+              "h": 2,
+              "sub": "percorre a cadeia",
+              "variant": "accent"
+            }
+          ],
+          "edges": [
+            {
+              "from": "e1",
+              "to": "e2",
+              "label": "Unwrap"
+            },
+            {
+              "from": "e2",
+              "to": "e3",
+              "label": "Unwrap"
+            },
+            {
+              "from": "e3",
+              "to": "e4",
+              "label": "Unwrap"
+            },
+            {
+              "from": "is",
+              "to": "e1",
+              "label": "começa",
+              "dashed": true,
+              "accent": true
+            }
+          ],
+          "caption": "errors.Is e errors.As chamam Unwrap repetidamente até achar o alvo ou acabar a cadeia."
+        },
+        {
+          "type": "h",
+          "text": "Sentinelas, tipos de erro, Is e As"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var ErrNaoEncontrado = errors.New(\"não encontrado\") // sentinela\n\ntype ErroValidacao struct { // erro tipado, carrega dados\n\tCampo string\n}\n\nfunc (e *ErroValidacao) Error() string {\n\treturn \"campo inválido: \" + e.Campo\n}\n\nfunc buscar(id string) error {\n\treturn fmt.Errorf(\"buscar %q: %w\", id, ErrNaoEncontrado)\n}\n\nerr := buscar(\"42\")\nif errors.Is(err, ErrNaoEncontrado) { // compara na cadeia\n\tfmt.Println(\"404\")\n}\n\nvar ev *ErroValidacao\nif errors.As(err, &ev) { // acha um tipo na cadeia\n\tfmt.Println(\"campo:\", ev.Campo)\n}"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Estratégia",
+            "Quando usar",
+            "Como checar"
+          ],
+          "rows": [
+            [
+              "Sentinela (`var ErrX = errors.New`)",
+              "Condição conhecida, sem dados extras (`io.EOF`, `sql.ErrNoRows`)",
+              "`errors.Is(err, ErrX)`"
+            ],
+            [
+              "Tipo de erro (struct)",
+              "O chamador precisa de campos (código, campo, retry-after)",
+              "`errors.As(err, &alvo)`"
+            ],
+            [
+              "Erro opaco (`fmt.Errorf`)",
+              "O chamador só precisa logar ou propagar",
+              "Não inspecionar"
+            ]
+          ]
+        },
+        {
+          "type": "list",
+          "items": [
+            "Compare com `errors.Is`, **nunca** com `==` quando o erro puder estar embrulhado.",
+            "Mensagens em minúsculas, sem pontuação final: o texto é concatenado com contexto (\"abrindo config: open x: no such file\").",
+            "Trate o erro **ou** devolva — não os dois. Logar e retornar gera logs duplicados em cada camada.",
+            "`errors.Join(e1, e2)` combina vários erros em um (Go 1.20); `fmt.Errorf` aceita vários `%w`, e `Is`/`As` inspecionam todos."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "panic e recover"
+        },
+        {
+          "type": "p",
+          "text": "`panic` interrompe a execução normal, roda os `defer`s e derruba o programa com um stack trace — a menos que um `defer` chame `recover()`. É para situações **realmente excepcionais**: violação de invariante interna (bug do programador), índice fora do limite, nil deref. Erros esperados (arquivo ausente, entrada inválida, rede) são `error`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func seguro(f func()) (err error) {\n\tdefer func() {\n\t\tif r := recover(); r != nil { // só vale dentro de defer\n\t\t\terr = fmt.Errorf(\"panic recuperado: %v\", r)\n\t\t}\n\t}()\n\tf()\n\treturn nil\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Um panic em uma goroutine **sem** recover derruba o processo inteiro, e `recover` não atravessa goroutines. Bibliotecas não devem deixar panic escapar pela API pública; servidores como `net/http` recuperam panics por requisição.",
+          "title": "Panic não é exceção"
+        }
+      ]
+    },
+    {
+      "id": "generics",
+      "title": "Genéricos: uma introdução",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Desde o **Go 1.18**, funções e tipos aceitam **parâmetros de tipo**. Eles substituem cópias de código por tipo (ou o uso de `any` com assertions) por uma única definição verificada em compilação. A Parte 3 aprofunda; aqui o essencial."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Number interface {\n\t~int | ~int64 | ~float64 // ~ inclui tipos derivados\n}\n\nfunc Soma[T Number](xs []T) T {\n\tvar s T\n\tfor _, x := range xs {\n\t\ts += x\n\t}\n\treturn s\n}\n\nfunc Map[T, U any](xs []T, f func(T) U) []U {\n\tout := make([]U, 0, len(xs))\n\tfor _, x := range xs {\n\t\tout = append(out, f(x))\n\t}\n\treturn out\n}\n\nSoma([]float64{1.5, 2})                  // T inferido: float64\nMap([]int{1, 2}, func(i int) string {    // [int, string] inferidos\n\treturn strconv.Itoa(i * 2)\n})"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Constraint** é uma interface que lista os tipos permitidos. `any` não impõe nada; `comparable` permite `==` (necessário para chaves de map); `cmp.Ordered` permite `<` e `>` (o antigo `constraints.Ordered` de `x/exp` foi substituído por ele no Go 1.21).",
+            "O til em `~int` significa \"`int` **e** qualquer tipo cujo tipo subjacente seja `int`\", como `type Dia int`.",
+            "Tipos genéricos: `type Pilha[T any] struct{ itens []T }`, usados como `Pilha[string]`.",
+            "Métodos de um tipo genérico não podem declarar seus próprios parâmetros de tipo.",
+            "Na maioria dos casos o compilador **infere** os argumentos de tipo."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Pilha[T any] struct{ itens []T }\n\nfunc (p *Pilha[T]) Push(x T) { p.itens = append(p.itens, x) }\n\nfunc (p *Pilha[T]) Pop() (T, bool) {\n\tvar zero T\n\tif len(p.itens) == 0 {\n\t\treturn zero, false\n\t}\n\tx := p.itens[len(p.itens)-1]\n\tp.itens = p.itens[:len(p.itens)-1]\n\treturn x, true\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Regra prática: só escreva código genérico depois de ter duplicado a mesma lógica para dois ou três tipos. Para comportamento diferente por tipo, interfaces continuam sendo a ferramenta certa; genéricos servem para algoritmos e contêineres.",
+          "title": "Quando usar"
+        }
+      ]
+    },
+    {
+      "id": "programa",
+      "title": "Juntando tudo: contador de palavras",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um CLI pequeno que lê o stdin, conta palavras e imprime as cinco mais frequentes. Usa pacotes, `io.Reader`/`io.Writer`, map, slice, `slices.SortFunc`, erros embrulhados e é fácil de testar porque `run` recebe interfaces, não `os.Stdin` fixo."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"bufio\"\n\t\"cmp\"\n\t\"errors\"\n\t\"fmt\"\n\t\"io\"\n\t\"maps\"\n\t\"os\"\n\t\"slices\"\n\t\"strings\"\n\t\"unicode\"\n)\n\ntype Entry struct {\n\tWord  string\n\tCount int\n}\n\n// count lê r palavra a palavra e devolve as frequências.\nfunc count(r io.Reader) (map[string]int, error) {\n\tfreq := make(map[string]int)\n\tsc := bufio.NewScanner(r)\n\tsc.Split(bufio.ScanWords)\n\tfor sc.Scan() {\n\t\tw := strings.ToLower(strings.TrimFunc(sc.Text(),\n\t\t\tfunc(r rune) bool { return !unicode.IsLetter(r) }))\n\t\tif w != \"\" {\n\t\t\tfreq[w]++\n\t\t}\n\t}\n\treturn freq, sc.Err()\n}",
+          "file": "main.go (parte 1)"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func top(freq map[string]int, n int) []Entry {\n\tes := make([]Entry, 0, len(freq))\n\tfor w, c := range maps.All(freq) {\n\t\tes = append(es, Entry{w, c})\n\t}\n\tslices.SortFunc(es, func(a, b Entry) int {\n\t\treturn cmp.Or(cmp.Compare(b.Count, a.Count),\n\t\t\tstrings.Compare(a.Word, b.Word))\n\t})\n\treturn es[:min(n, len(es))]\n}\n\nfunc run(r io.Reader, w io.Writer) error {\n\tfreq, err := count(r)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"contando palavras: %w\", err)\n\t}\n\tif len(freq) == 0 {\n\t\treturn errors.New(\"entrada vazia\")\n\t}\n\tfor _, e := range top(freq, 5) {\n\t\tfmt.Fprintf(w, \"%4d  %s\\n\", e.Count, e.Word)\n\t}\n\treturn nil\n}\n\nfunc main() {\n\tif err := run(os.Stdin, os.Stdout); err != nil {\n\t\tfmt.Fprintln(os.Stderr, \"erro:\", err)\n\t\tos.Exit(1)\n\t}\n}",
+          "file": "main.go (parte 2)"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "$ echo \"O gato viu o rato. O rato fugiu, o gato não!\" | go run .\n   4  o\n   2  gato\n   2  rato\n   1  fugiu\n   1  não"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`bufio.Scanner` com `ScanWords` lê em streaming — o arquivo inteiro não precisa caber na memória.",
+            "`cmp.Or` (Go 1.22) devolve o primeiro valor não zero: usado para desempatar por palavra, tornando a saída determinística apesar da ordem aleatória do map.",
+            "`min` é builtin desde o Go 1.21.",
+            "Só `main` chama `os.Exit`; o restante devolve erros. Assim `run` pode ser testado com `strings.NewReader` e `bytes.Buffer`."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func TestRun(t *testing.T) {\n\tvar out bytes.Buffer\n\terr := run(strings.NewReader(\"a b a\"), &out)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\twant := \"   2  a\\n   1  b\\n\"\n\tif out.String() != want {\n\t\tt.Errorf(\"got %q, want %q\", out.String(), want)\n\t}\n}",
+          "file": "main_test.go"
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Sintoma",
+            "Como evitar"
+          ],
+          "rows": [
+            [
+              "Shadowing com `:=` em bloco interno",
+              "Variável externa continua zerada/nil",
+              "Use `=` para atribuir; ative linter de shadow"
+            ],
+            [
+              "Interface com ponteiro nil dentro",
+              "`err != nil` verdadeiro sem erro real",
+              "Retorne `nil` literal; declare como `error`"
+            ],
+            [
+              "Escrita em map nil",
+              "`panic: assignment to entry in nil map`",
+              "Inicialize com `make` ou literal"
+            ],
+            [
+              "Aliasing de slices após `append`",
+              "Dados alterados em outro slice",
+              "`slices.Clone`, full slice `s[a:b:b]`, sempre use o retorno"
+            ],
+            [
+              "`defer` em laço",
+              "Arquivos/conexões abertos até o fim da função",
+              "Extraia o corpo para uma função"
+            ],
+            [
+              "Argumentos do `defer` avaliados cedo",
+              "Log mostra valor antigo",
+              "Use closure `defer func(){...}()`"
+            ],
+            [
+              "`len(string)` como nº de caracteres",
+              "Contagem errada com acentos",
+              "`utf8.RuneCountInString` ou `[]rune`"
+            ],
+            [
+              "Variável de laço capturada (< Go 1.22)",
+              "Todas as closures veem o último valor",
+              "`go 1.22` no go.mod; ou copie `v := v`"
+            ],
+            [
+              "Comparar erro com `==`",
+              "Falha quando o erro foi embrulhado",
+              "`errors.Is` / `errors.As`"
+            ],
+            [
+              "Copiar struct com Mutex",
+              "Lock não protege; `go vet` reclama",
+              "Use ponteiro e não copie"
+            ],
+            [
+              "Depender da ordem do map",
+              "Testes instáveis, saída variável",
+              "Ordene as chaves antes"
+            ],
+            [
+              "Goroutine sem controle de fim",
+              "Vazamento de goroutines",
+              "Parte 2: context e sync.WaitGroup"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "Módulo",
+              "def": "Coleção de pacotes versionados juntos, definida por um `go.mod`."
+            },
+            {
+              "term": "Pacote",
+              "def": "Diretório de arquivos `.go` com o mesmo `package`; unidade de compilação e de visibilidade."
+            },
+            {
+              "term": "Exportado",
+              "def": "Identificador que começa com letra maiúscula e é visível fora do pacote."
+            },
+            {
+              "term": "Valor zero",
+              "def": "Valor padrão de um tipo quando nenhum é atribuído (`0`, `\"\"`, `nil`...)."
+            },
+            {
+              "term": "rune",
+              "def": "Alias de `int32`; representa um *code point* Unicode."
+            },
+            {
+              "term": "Slice",
+              "def": "Cabeçalho (ponteiro, len, cap) sobre um array subjacente."
+            },
+            {
+              "term": "Method set",
+              "def": "Conjunto de métodos de um tipo que define quais interfaces ele satisfaz."
+            },
+            {
+              "term": "Embedding",
+              "def": "Campo anônimo cujo tipo tem campos e métodos promovidos ao tipo externo."
+            },
+            {
+              "term": "Interface",
+              "def": "Conjunto de assinaturas de métodos, satisfeito implicitamente."
+            },
+            {
+              "term": "Sentinela",
+              "def": "Valor de erro global e comparável com `errors.Is` (ex.: `io.EOF`)."
+            },
+            {
+              "term": "Constraint",
+              "def": "Interface que restringe quais tipos podem instanciar um parâmetro de tipo."
+            },
+            {
+              "term": "defer",
+              "def": "Agenda uma chamada para executar quando a função envolvente retorna."
+            },
+            {
+              "term": "iota",
+              "def": "Contador de constantes que reinicia a cada bloco `const`."
+            },
+            {
+              "term": "GOOS / GOARCH",
+              "def": "Variáveis que escolhem o sistema operacional e a arquitetura de destino do build."
+            },
+            {
+              "term": "MVS",
+              "def": "*Minimal Version Selection*: algoritmo de resolução de dependências do Go."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Você já tem a base para ler quase qualquer código Go. Para fixar, escreva um CLI pequeno, rode `go vet ./...` e `gofmt -l .` com frequência e leia o código da biblioteca padrão — ela é o melhor material didático de Go idiomático."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Parte 2 — Concorrência**: goroutines, o scheduler GMP, channels, `select`, `sync`, `context`, padrões (worker pool, pipeline, fan-out/fan-in) e o *race detector*.",
+            "**Parte 3 — Go em produção**: genéricos avançados, testes, benchmarks e fuzzing, `net/http`, layout de projeto, pprof, GC e escape analysis, builds para containers e `client-go`/controllers.",
+            "Material oficial offline: `go doc`, o *Tour of Go* e *Effective Go*, além da especificação em go.dev/ref/spec."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Ferramenta para praticar: crie o módulo no diretório `~/go-lab` e mantenha vários `main` em `cmd/`. `go run ./cmd/<nome>` roda cada experimento sem poluir o resto.",
+          "title": "Laboratório"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1569 @@
+{
+  "id": "kubernetes-1",
+  "title": "Kubernetes 1 — Arquitetura e fundamentos",
+  "summary": "Como o Kubernetes funciona por dentro: API declarativa, control plane, nós, controllers em loop e os objetos e comandos essenciais para começar.",
+  "category": "Infraestrutura",
+  "level": "Iniciante",
+  "minutes": 32,
+  "updated": "out 2026",
+  "tags": [
+    "kubernetes",
+    "k8s",
+    "containers",
+    "orquestração",
+    "kubectl",
+    "control plane",
+    "apiserver",
+    "etcd",
+    "scheduler",
+    "kubelet",
+    "controller",
+    "reconciliação",
+    "pod",
+    "kind"
+  ],
+  "series": "Kubernetes",
+  "part": 1,
+  "sections": [
+    {
+      "id": "problema",
+      "title": "O problema que o Kubernetes resolve",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Rodar **uma** aplicação em **um** servidor é simples. O problema aparece quando são dezenas de serviços, em dezenas de máquinas, que precisam subir, escalar, se recuperar de falhas e ser atualizados sem derrubar ninguém. Fazer isso à mão (SSH, scripts, planilhas de \"qual serviço roda onde\") não escala e não é reproduzível."
+        },
+        {
+          "type": "p",
+          "text": "O **Kubernetes** (K8s) é um sistema de **orquestração de containers** de código aberto, criado no Google a partir da experiência com o Borg e hoje mantido pela CNCF. Você descreve *o que* quer rodar; ele decide *onde* rodar e trabalha continuamente para manter isso verdadeiro."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Era",
+            "Unidade de deploy",
+            "Dor principal"
+          ],
+          "rows": [
+            [
+              "Servidores físicos",
+              "Máquina inteira",
+              "Provisionamento lento, uso baixo de recursos, \"na minha máquina funciona\""
+            ],
+            [
+              "Máquinas virtuais",
+              "VM com SO completo",
+              "Isolamento bom, mas imagens pesadas e boot lento; ainda sem scheduling entre hosts"
+            ],
+            [
+              "Containers",
+              "Processo isolado (namespaces + cgroups)",
+              "Leves e portáveis, mas alguém precisa decidir onde cada um roda e reiniciá-lo"
+            ],
+            [
+              "Orquestração",
+              "Pod/Deployment declarado",
+              "Complexidade operacional do próprio orquestrador"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Um container é só um processo Linux com visão restrita do sistema (**namespaces** de PID, rede, montagem...) e limites de recursos (**cgroups**). Isso o torna barato, mas um container sozinho não sabe se recuperar quando o host morre. É essa lacuna que o Kubernetes preenche."
+        },
+        {
+          "type": "h",
+          "text": "O que o Kubernetes entrega"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Scheduling** — escolhe o nó para cada Pod com base em recursos, afinidades e restrições.",
+            "**Autocura** — reinicia containers que falham, recria Pods de nós perdidos, tira da rotação o que não está saudável.",
+            "**Escala** — aumenta e diminui réplicas manualmente ou por métricas.",
+            "**Rollouts e rollbacks** — atualizações graduais com histórico de revisões.",
+            "**Descoberta de serviços e balanceamento** — nome DNS estável na frente de Pods efêmeros.",
+            "**Configuração e segredos** desacoplados da imagem.",
+            "**Extensibilidade** — qualquer coisa vira recurso da API (CRDs), não só Pods."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Kubernetes não é um PaaS: não faz build de código, não traz CI/CD, observabilidade nem banco de dados prontos. Ele é uma plataforma para construir essas coisas — por isso o ecossistema ao redor (Helm, Argo CD, Prometheus...) é tão grande.",
+          "title": "Fronteira do projeto"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Antes de adotar K8s pergunte se você precisa dele. Para um ou dois serviços, um PaaS ou um simples `docker compose` em uma VM pode ser a resposta certa. O custo do Kubernetes é operacional, não de licença."
+        }
+      ]
+    },
+    {
+      "id": "declarativo",
+      "title": "Modelo declarativo e a API no centro",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A decisão de design mais importante do Kubernetes é ser **declarativo**: você não manda \"suba 3 containers\"; você registra o fato \"deve haver 3 réplicas desta imagem\". O sistema compara esse **estado desejado** com o **estado observado** e age para fechar a diferença — e continua agindo para sempre."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Imperativo",
+            "Declarativo"
+          ],
+          "rows": [
+            [
+              "`kubectl run`, `kubectl scale`, `kubectl edit`",
+              "`kubectl apply -f arquivo.yaml`"
+            ],
+            [
+              "Descreve ações (\"faça X\")",
+              "Descreve resultado (\"quero X\")"
+            ],
+            [
+              "Repetir o comando pode falhar ou duplicar",
+              "Idempotente: aplicar 2 vezes = aplicar 1 vez"
+            ],
+            [
+              "Difícil de auditar e reproduzir",
+              "Arquivos versionáveis em Git (base do GitOps)"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O segundo pilar: **tudo passa pela API**. O `kube-apiserver` expõe uma API REST (JSON sobre HTTPS; também protobuf internamente) com os recursos do cluster. `kubectl`, o scheduler, o kubelet, os controllers e suas ferramentas de CI são todos *clientes* dessa mesma API. Nenhum componente fala diretamente com outro — todos leem e escrevem objetos no apiserver."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# O kubectl é só um cliente HTTP com YAML bonito:\nkubectl get pods -v=8 2>&1 | grep -E 'GET|Response'\n# GET https://127.0.0.1:6443/api/v1/namespaces/default/pods\n# Response Status: 200 OK in 8 milliseconds\n\n# Ou chame a API direto, via proxy autenticado local:\nkubectl proxy --port=8001 &\ncurl -s localhost:8001/api/v1/namespaces/default/pods | head"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Esse desenho de \"hub-and-spoke\" em torno da API é o que torna o Kubernetes extensível: um novo componente (um operador, um autoscaler) só precisa saber ler e escrever objetos, sem ser integrado ao núcleo.",
+          "title": "Por que isso importa"
+        },
+        {
+          "type": "h",
+          "text": "Níveis de uma mudança"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Você escreve **intenção** (`spec`) em um objeto.",
+            "Controllers escrevem **fatos** (`status`) no mesmo objeto.",
+            "Quem quiser reagir se inscreve em eventos (*watch*) em vez de fazer polling.",
+            "A fonte da verdade persistente é o **etcd**, acessado apenas pelo apiserver."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arquitetura",
+      "title": "Arquitetura: control plane e nós",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um cluster tem dois grupos de máquinas. O **control plane** toma decisões (onde agendar, quantas réplicas, o que reconciliar). Os **nós** (workers) executam as cargas de trabalho. Em ambientes gerenciados (EKS, GKE, AKS) o provedor opera o control plane para você."
+        },
+        {
+          "type": "diagram",
+          "title": "Componentes de um cluster",
+          "cols": 12,
+          "rows": 21.4,
+          "nodes": [
+            {
+              "id": "sch",
+              "label": "scheduler",
+              "x": 0.3,
+              "y": 1,
+              "w": 5.2,
+              "h": 2,
+              "sub": "kube-scheduler"
+            },
+            {
+              "id": "cm",
+              "label": "controller-manager",
+              "x": 6.5,
+              "y": 1,
+              "w": 5.2,
+              "h": 2,
+              "sub": "controllers nativos"
+            },
+            {
+              "id": "api",
+              "label": "API Server",
+              "x": 3.5,
+              "y": 5,
+              "w": 5,
+              "h": 2.2,
+              "sub": "kube-apiserver",
+              "variant": "accent"
+            },
+            {
+              "id": "etcd",
+              "label": "etcd",
+              "x": 0.3,
+              "y": 9,
+              "w": 4.4,
+              "h": 2,
+              "sub": "banco chave-valor"
+            },
+            {
+              "id": "ccm",
+              "label": "cloud-ctrl-mgr",
+              "x": 7.3,
+              "y": 9,
+              "w": 4.4,
+              "h": 2,
+              "sub": "APIs do provedor"
+            },
+            {
+              "id": "kl",
+              "label": "kubelet",
+              "x": 3.5,
+              "y": 14.2,
+              "w": 5,
+              "h": 2,
+              "sub": "agente do nó"
+            },
+            {
+              "id": "rt",
+              "label": "containerd",
+              "x": 0.3,
+              "y": 18.2,
+              "w": 5.2,
+              "h": 2,
+              "sub": "runtime via CRI"
+            },
+            {
+              "id": "kp",
+              "label": "kube-proxy",
+              "x": 6.5,
+              "y": 18.2,
+              "w": 5.2,
+              "h": 2,
+              "sub": "regras de Service"
+            }
+          ],
+          "edges": [
+            {
+              "from": "sch",
+              "to": "api",
+              "label": "watch · bind"
+            },
+            {
+              "from": "cm",
+              "to": "api",
+              "label": "watch · escreve"
+            },
+            {
+              "from": "api",
+              "to": "etcd",
+              "label": "grava",
+              "accent": true
+            },
+            {
+              "from": "ccm",
+              "to": "api"
+            },
+            {
+              "from": "kl",
+              "to": "api",
+              "label": "registra · status",
+              "accent": true
+            },
+            {
+              "from": "kl",
+              "to": "rt",
+              "label": "CRI"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Control plane",
+              "x": 0,
+              "y": 0,
+              "w": 12,
+              "h": 12.2
+            },
+            {
+              "label": "Nó worker",
+              "x": 0,
+              "y": 12.8,
+              "w": 12,
+              "h": 8.4,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "O apiserver é o único componente que fala com o etcd. Todos os outros — dentro e fora do control plane — conversam com o apiserver. O kube-proxy também observa a API (omitido por clareza)."
+        },
+        {
+          "type": "h",
+          "text": "Control plane"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Componente",
+            "Responsabilidade",
+            "Detalhe importante"
+          ],
+          "rows": [
+            [
+              "kube-apiserver",
+              "Porta de entrada REST: autentica, autoriza, valida, persiste, notifica watchers",
+              "Stateless; escala horizontalmente atrás de um load balancer"
+            ],
+            [
+              "etcd",
+              "Armazém consistente chave-valor (Raft) com todo o estado do cluster",
+              "Só o apiserver o acessa; use 3 ou 5 membros (quórum) e faça backup"
+            ],
+            [
+              "kube-scheduler",
+              "Atribui cada Pod sem nó a um nó",
+              "Só decide — quem executa é o kubelet"
+            ],
+            [
+              "kube-controller-manager",
+              "Roda dezenas de controllers (Deployment, ReplicaSet, Node, Job, EndpointSlice...)",
+              "Um binário, muitos loops independentes"
+            ],
+            [
+              "cloud-controller-manager",
+              "Integra com a nuvem: nós, rotas, LoadBalancers",
+              "Ausente em clusters bare-metal/locais"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Perder o etcd é perder o cluster: todos os objetos (e Secrets) vivem lá. Faça snapshots periódicos (`etcdctl snapshot save`), teste a restauração e proteja o acesso — ele guarda Secrets em base64, e só ficam cifrados em repouso se você configurar `EncryptionConfiguration` (ou usar KMS).",
+          "title": "etcd é o ponto crítico"
+        },
+        {
+          "type": "h",
+          "text": "Componentes dos nós"
+        },
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "kubelet",
+              "def": "Agente em cada nó. Observa os Pods atribuídos a ele, pede ao runtime que crie os containers, executa probes e reporta o `status` ao apiserver. Não gerencia containers que não vieram do Kubernetes."
+            },
+            {
+              "term": "Container runtime",
+              "def": "Quem realmente cria containers. O kubelet fala com ele pela **CRI** (Container Runtime Interface, gRPC). Os runtimes comuns são **containerd** e **CRI-O**; ambos usam um runtime OCI de baixo nível (runc ou crun)."
+            },
+            {
+              "term": "kube-proxy",
+              "def": "Programa regras de rede (iptables, IPVS ou nftables) para que o IP virtual de um Service chegue a um dos Pods. Alguns CNIs, como o Cilium, podem substituí-lo por eBPF."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "O suporte ao Docker Engine como runtime via **dockershim** foi removido no Kubernetes 1.24. Imagens Docker/OCI continuam funcionando normalmente — o que mudou foi o que o kubelet usa para executá-las. O backend **nftables** do kube-proxy chegou a GA no 1.33.",
+          "title": "Docker foi removido?"
+        }
+      ]
+    },
+    {
+      "id": "apply",
+      "title": "O que acontece num kubectl apply",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Entender essa cadeia é a melhor ferramenta de diagnóstico que existe: quando algo não funciona, a pergunta é sempre *em qual elo a cadeia parou?*. Vamos seguir `kubectl apply -f deployment.yaml` com 3 réplicas."
+        },
+        {
+          "type": "diagram",
+          "title": "Do apply ao container",
+          "cols": 12,
+          "rows": 15.4,
+          "nodes": [
+            {
+              "id": "kc",
+              "label": "kubectl",
+              "x": 4.4,
+              "y": 0,
+              "w": 3.4,
+              "h": 2,
+              "sub": "seu terminal"
+            },
+            {
+              "id": "api",
+              "label": "API Server",
+              "x": 4.4,
+              "y": 5,
+              "w": 3.4,
+              "h": 2,
+              "sub": "kube-apiserver",
+              "variant": "accent"
+            },
+            {
+              "id": "etcd",
+              "label": "etcd",
+              "x": 9.8,
+              "y": 5,
+              "w": 2.2,
+              "h": 2
+            },
+            {
+              "id": "cm",
+              "label": "controllers",
+              "x": 0.2,
+              "y": 9,
+              "w": 3.6,
+              "h": 2,
+              "sub": "Dep → RS → Pod"
+            },
+            {
+              "id": "sch",
+              "label": "scheduler",
+              "x": 4.2,
+              "y": 9,
+              "w": 3.6,
+              "h": 2,
+              "sub": "escolhe o nó"
+            },
+            {
+              "id": "kl",
+              "label": "kubelet",
+              "x": 8.2,
+              "y": 9,
+              "w": 3.6,
+              "h": 2,
+              "sub": "no nó escolhido"
+            },
+            {
+              "id": "rt",
+              "label": "containerd",
+              "x": 8.2,
+              "y": 13,
+              "w": 3.6,
+              "h": 2,
+              "sub": "via CRI"
+            }
+          ],
+          "edges": [
+            {
+              "from": "kc",
+              "to": "api",
+              "label": "1 apply",
+              "accent": true
+            },
+            {
+              "from": "api",
+              "to": "etcd",
+              "label": "2 grava"
+            },
+            {
+              "from": "cm",
+              "to": "api",
+              "label": "3 cria RS/Pods"
+            },
+            {
+              "from": "sch",
+              "to": "api",
+              "label": "4 bind"
+            },
+            {
+              "from": "kl",
+              "to": "api",
+              "label": "5 watch",
+              "dashed": true
+            },
+            {
+              "from": "kl",
+              "to": "rt",
+              "label": "6 CRI"
+            }
+          ],
+          "caption": "Os componentes nunca se chamam entre si: cada um escreve no apiserver e é notificado por watch."
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "1. Cliente → apiserver",
+              "text": "O kubectl lê seu kubeconfig, autentica (certificado, token, OIDC) e envia um `PATCH`/`POST`. O apiserver passa por **autenticação → autorização (RBAC) → admission** (mutating e validating) → validação de schema."
+            },
+            {
+              "title": "2. Persistência",
+              "text": "O objeto `Deployment` é gravado no etcd. O `PATCH` só retorna depois do commit no Raft. Neste ponto nada rodou — só a *intenção* existe."
+            },
+            {
+              "title": "3. Controllers reagem",
+              "text": "O controller de Deployment vê o objeto novo (watch) e cria um **ReplicaSet**. O controller de ReplicaSet vê o RS e cria 3 objetos **Pod** — ainda sem nó (`spec.nodeName` vazio)."
+            },
+            {
+              "title": "4. Scheduler",
+              "text": "O scheduler observa Pods sem nó, escolhe um nó para cada (filtragem + pontuação) e grava um objeto `Binding`, que preenche `spec.nodeName`."
+            },
+            {
+              "title": "5. Kubelet",
+              "text": "O kubelet do nó escolhido vê um Pod atribuído a si. Prepara volumes, rede (via CNI) e solicita ao runtime: baixar a imagem e criar os containers."
+            },
+            {
+              "title": "6. Status de volta",
+              "text": "O kubelet reporta o `status` (fase, IPs, containers prontos). Os controllers atualizam `status.readyReplicas` do ReplicaSet e do Deployment."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Cada elo deixa rastros. `kubectl get deploy,rs,pods` mostra a cadeia criada; `kubectl describe pod` mostra os **Events** (`Scheduled`, `Pulling`, `Started`); `kubectl get events --sort-by=.lastTimestamp` dá a linha do tempo do namespace.",
+          "title": "Depurando a cadeia"
+        },
+        {
+          "type": "h",
+          "text": "Como o scheduler escolhe"
+        },
+        {
+          "type": "p",
+          "text": "O scheduler trabalha um Pod por vez, em duas fases dentro de um *scheduling cycle*. Na **filtragem** ele descarta nós que não servem; na **pontuação** ele ordena os que sobraram e fica com o melhor (empates são desfeitos aleatoriamente)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Filtro**: recursos livres suficientes para os `requests` do Pod, `nodeSelector`/afinidade, *taints* sem *toleration* correspondente, portas, volumes na zona certa.",
+            "**Pontuação**: balanceamento de recursos, afinidade preferida, espalhamento por topologia, imagem já presente no nó.",
+            "Se nenhum nó passa no filtro, o Pod fica `Pending` com evento `FailedScheduling` explicando cada motivo.",
+            "O scheduler decide por **`requests`**, não pelo uso real de CPU/memória."
+          ]
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Nós candidatos após cada etapa",
+          "unit": "nós",
+          "bars": [
+            {
+              "label": "Todos os nós",
+              "value": 100,
+              "display": "100"
+            },
+            {
+              "label": "Após recursos (requests)",
+              "value": 62,
+              "display": "62"
+            },
+            {
+              "label": "Após taints e afinidade",
+              "value": 30,
+              "display": "30"
+            },
+            {
+              "label": "Após pontuação: escolhido",
+              "value": 1,
+              "display": "1"
+            }
+          ],
+          "caption": "Dados ilustrativos: o número de nós eliminados em cada filtro depende do cluster e do Pod."
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Onde o tempo costuma ir até o Pod ficar pronto",
+          "unit": "s",
+          "bars": [
+            {
+              "label": "Admissão + persistência",
+              "value": 0.05,
+              "display": "~50 ms"
+            },
+            {
+              "label": "Controllers + scheduler",
+              "value": 0.2,
+              "display": "~200 ms"
+            },
+            {
+              "label": "Pull da imagem (sem cache)",
+              "value": 8,
+              "display": "~8 s"
+            },
+            {
+              "label": "Start do container",
+              "value": 1,
+              "display": "~1 s"
+            },
+            {
+              "label": "Readiness probe (inicial)",
+              "value": 5,
+              "display": "~5 s"
+            }
+          ],
+          "caption": "Valores ilustrativos de ordem de grandeza. O plano de controle é rápido; quase sempre o tempo está em imagem, app e probes."
+        }
+      ]
+    },
+    {
+      "id": "reconciliacao",
+      "title": "Controllers e o loop de reconciliação",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um **controller** é um loop de controle, como o termostato de uma casa: mede a temperatura, compara com o alvo e liga ou desliga o aquecedor. No Kubernetes, cada controller cuida de um tipo de objeto e tenta aproximar o estado real do `spec`."
+        },
+        {
+          "type": "diagram",
+          "title": "O loop de reconciliação",
+          "cols": 12,
+          "rows": 9.6,
+          "nodes": [
+            {
+              "id": "spec",
+              "label": "spec",
+              "x": 0.3,
+              "y": 0,
+              "w": 4.6,
+              "h": 2,
+              "sub": "estado desejado"
+            },
+            {
+              "id": "st",
+              "label": "Mundo real",
+              "x": 7.1,
+              "y": 0,
+              "w": 4.6,
+              "h": 2,
+              "sub": "Pods, nós, status"
+            },
+            {
+              "id": "ctl",
+              "label": "Controller",
+              "x": 3.5,
+              "y": 5,
+              "w": 5,
+              "h": 2,
+              "sub": "compara e age",
+              "variant": "accent"
+            },
+            {
+              "id": "act",
+              "label": "Ação",
+              "x": 3.5,
+              "y": 8.2,
+              "w": 5,
+              "h": 1.4,
+              "sub": "cria ou apaga",
+              "variant": "muted"
+            }
+          ],
+          "edges": [
+            {
+              "from": "ctl",
+              "to": "spec",
+              "label": "1 lê",
+              "dashed": true
+            },
+            {
+              "from": "ctl",
+              "to": "st",
+              "label": "2 observa",
+              "dashed": true
+            },
+            {
+              "from": "ctl",
+              "to": "act",
+              "label": "3 age",
+              "accent": true
+            }
+          ],
+          "caption": "O loop é nivelado (*level-triggered*): reage ao estado atual, não ao evento que o causou. Se o controller ficar fora do ar e voltar, ele simplesmente reconcilia."
+        },
+        {
+          "type": "p",
+          "text": "Esse detalhe é essencial. Controllers são **level-triggered**, não *edge-triggered*: perder um evento não é problema, porque o próximo ciclo recalcula tudo a partir do estado. Por isso o sistema se recupera sozinho de falhas parciais."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "for key := range workqueue {          // \"default/web\"\n  desired := lister.Get(key)          // spec, do cache local\n  pods := podLister.OwnedBy(desired)  // o que existe\n  switch {\n  case len(pods) < desired.Replicas:\n    create(desired.Replicas - len(pods))\n  case len(pods) > desired.Replicas:\n    delete(len(pods) - desired.Replicas)\n  }\n  updateStatus(desired)               // escreve de volta\n}",
+          "file": "reconcile (pseudocódigo)"
+        },
+        {
+          "type": "h",
+          "text": "Watch, informers e resourceVersion"
+        },
+        {
+          "type": "p",
+          "text": "Se cada controller fizesse `GET` em loop, o apiserver cairia. Em vez disso, a API oferece **watch**: uma conexão HTTP longa que transmite eventos `ADDED`, `MODIFIED` e `DELETED`. As bibliotecas cliente (client-go) empacotam isso em **informers**."
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "List",
+              "text": "O informer faz um `LIST` completo e preenche um cache local em memória, anotando o `resourceVersion` retornado."
+            },
+            {
+              "title": "Watch",
+              "text": "Abre `WATCH ?resourceVersion=N` e recebe somente o que mudou depois de N. Cada evento atualiza o cache e enfileira a chave do objeto na workqueue."
+            },
+            {
+              "title": "Reconcile",
+              "text": "Workers consomem a fila e executam a reconciliação, lendo o cache (não o apiserver) e escrevendo mudanças via API."
+            },
+            {
+              "title": "Resync",
+              "text": "Se a conexão cai ou o `resourceVersion` expira (erro `410 Gone`), o informer refaz o LIST. Também há *resyncs* periódicos de segurança."
+            }
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O `resourceVersion` é derivado da revisão do etcd e funciona como um **token opaco** de versão. Também sustenta o **controle de concorrência otimista**: um `PUT` com `resourceVersion` antigo recebe `409 Conflict`, e o cliente relê e tenta de novo, em vez de sobrescrever a mudança de outro."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Nunca interprete `resourceVersion` como número comparável: o contrato da API é tratá-lo como string opaca, só para igualdade e para continuar um watch.",
+          "title": "Opaco"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Há vários controllers no kube-controller-manager, mas eles competem por réplicas do próprio componente. Para alta disponibilidade, rodam-se várias instâncias e uma **eleição de líder** (via objeto `Lease`) deixa apenas uma ativa por vez.",
+          "title": "Alta disponibilidade"
+        }
+      ]
+    },
+    {
+      "id": "anatomia",
+      "title": "Anatomia de um objeto",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Quase todo objeto Kubernetes tem a mesma estrutura de cinco campos. Aprender esse esqueleto uma vez permite ler qualquer recurso, inclusive CRDs de terceiros."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: lab\n  labels:\n    app: web\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: web\n  template:\n    metadata:\n      labels:\n        app: web\n    spec:\n      containers:\n        - name: web\n          image: nginx:1.27\n          ports:\n            - containerPort: 80",
+          "file": "deployment.yaml"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Campo",
+            "Quem escreve",
+            "Para quê"
+          ],
+          "rows": [
+            [
+              "`apiVersion`",
+              "Você",
+              "Grupo e versão da API (`apps/v1`; núcleo é só `v1`)"
+            ],
+            [
+              "`kind`",
+              "Você",
+              "Tipo do recurso (`Deployment`, `Pod`, `Service`...)"
+            ],
+            [
+              "`metadata`",
+              "Você e o sistema",
+              "Identidade: `name`, `namespace`, `labels`, `annotations`, além de `uid`, `resourceVersion`, `ownerReferences` (preenchidos pelo cluster)"
+            ],
+            [
+              "`spec`",
+              "Você",
+              "Estado **desejado**. Formato depende do `kind`"
+            ],
+            [
+              "`status`",
+              "Controllers",
+              "Estado **observado**. Você não escreve (é um subrecurso separado)"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Nem todo recurso tem `spec` e `status`. `ConfigMap` e `Secret`, por exemplo, guardam dados em `data`. Mas o princípio vale: o que você declara fica à parte do que o sistema observa.",
+          "title": "Exceções"
+        },
+        {
+          "type": "h",
+          "text": "Status e conditions"
+        },
+        {
+          "type": "p",
+          "text": "O `status` diz se a intenção foi realizada. Muitos recursos usam uma lista de **conditions** (tipo, valor `True`/`False`/`Unknown`, motivo, mensagem, horário), um padrão que ferramentas como `kubectl wait` e Argo CD usam para decidir o que é \"saudável\"."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "status:\n  replicas: 3\n  readyReplicas: 3\n  availableReplicas: 3\n  observedGeneration: 2\n  conditions:\n    - type: Available\n      status: \"True\"\n      reason: MinimumReplicasAvailable\n    - type: Progressing\n      status: \"True\"\n      reason: NewReplicaSetAvailable",
+          "file": "kubectl get deploy web -o yaml (trecho)"
+        },
+        {
+          "type": "p",
+          "text": "`metadata.generation` sobe a cada mudança no `spec`; `status.observedGeneration` mostra até qual geração o controller já processou. Se forem diferentes, o controller ainda não viu sua mudança — o que importa ao interpretar um `status` desatualizado."
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "`kubectl apply` com o cliente antigo guarda a última configuração na anotação `kubectl.kubernetes.io/last-applied-configuration`. O modo moderno é o **server-side apply** (`--server-side`), em que o apiserver rastreia a propriedade de cada campo em `managedFields` e detecta conflitos entre quem edita o quê.",
+          "title": "apply de cliente vs servidor"
+        }
+      ]
+    },
+    {
+      "id": "organizacao",
+      "title": "Labels, namespaces e donos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Objetos precisam ser agrupados e relacionados sem acoplamento. O Kubernetes faz isso com **labels** e **selectors**, não com hierarquias fixas."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Mecanismo",
+            "Sintaxe",
+            "Usado para"
+          ],
+          "rows": [
+            [
+              "Label",
+              "`app: web` em `metadata.labels`",
+              "Identificar e selecionar. Chave/valor curtos (até 63 chars no valor)"
+            ],
+            [
+              "Selector",
+              "`matchLabels` / `matchExpressions`",
+              "Um Service, ReplicaSet ou NetworkPolicy escolhe objetos pelos labels"
+            ],
+            [
+              "Annotation",
+              "`metadata.annotations`",
+              "Metadados não filtráveis: URLs, config de ferramentas, notas. Valores maiores"
+            ],
+            [
+              "Namespace",
+              "`metadata.namespace`",
+              "Escopo de nomes, cotas e RBAC dentro do cluster"
+            ],
+            [
+              "ownerReference",
+              "`metadata.ownerReferences`",
+              "Quem criou este objeto; base da coleta de lixo"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# Selecionar por label\nkubectl get pods -l app=web\nkubectl get pods -l 'env in (prod,staging),tier!=db'\n\n# Ver labels e filtrar colunas\nkubectl get pods --show-labels\nkubectl label pod web-x tier=frontend\nkubectl annotate pod web-x owner=time-pagamentos"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "O `selector` de um Deployment é **imutável** e precisa casar com os labels de `template.metadata.labels`. Um selector largo demais (ex.: só `app: web` em dois Deployments diferentes) faz os ReplicaSets disputarem os mesmos Pods. Use labels mais específicos, como `app.kubernetes.io/name` + `instance`.",
+          "title": "Selector que sequestra Pods"
+        },
+        {
+          "type": "h",
+          "text": "Namespaces"
+        },
+        {
+          "type": "p",
+          "text": "Namespaces dividem o cluster em espaços lógicos: nomes só precisam ser únicos *dentro* de um namespace, e RBAC, `ResourceQuota` e `NetworkPolicy` se aplicam por namespace. Eles **não** são fronteira de segurança forte por si só: sem NetworkPolicy, Pods de namespaces diferentes se falam livremente."
+        },
+        {
+          "type": "list",
+          "items": [
+            "`default` — onde cai tudo que você não especifica.",
+            "`kube-system` — componentes do próprio cluster (CoreDNS, kube-proxy).",
+            "`kube-public` e `kube-node-lease` — descoberta pública e *heartbeats* dos nós (Leases).",
+            "Recursos de escopo de cluster (`Node`, `PersistentVolume`, `Namespace`, `ClusterRole`) não pertencem a nenhum namespace."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Donos e coleta de lixo"
+        },
+        {
+          "type": "p",
+          "text": "Quando um controller cria um objeto filho, ele grava um **ownerReference** apontando para o pai. O *garbage collector* usa esse vínculo: ao apagar o Deployment, ReplicaSets e Pods órfãos são apagados em cascata."
+        },
+        {
+          "type": "diagram",
+          "title": "Cadeia de donos",
+          "cols": 12,
+          "rows": 11,
+          "nodes": [
+            {
+              "id": "dep",
+              "label": "Deployment",
+              "x": 3.5,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "web",
+              "variant": "accent"
+            },
+            {
+              "id": "rs",
+              "label": "ReplicaSet",
+              "x": 3.5,
+              "y": 4,
+              "w": 5,
+              "h": 2,
+              "sub": "web-7d9f6b"
+            },
+            {
+              "id": "p1",
+              "label": "Pod",
+              "x": 0.5,
+              "y": 8.6,
+              "w": 5,
+              "h": 2,
+              "sub": "web-7d9f6b-abc"
+            },
+            {
+              "id": "p2",
+              "label": "Pod",
+              "x": 6.5,
+              "y": 8.6,
+              "w": 5,
+              "h": 2,
+              "sub": "web-7d9f6b-xyz"
+            }
+          ],
+          "edges": [
+            {
+              "from": "dep",
+              "to": "rs",
+              "label": "dono de"
+            },
+            {
+              "from": "rs",
+              "to": "p1",
+              "label": "dono de"
+            },
+            {
+              "from": "rs",
+              "to": "p2",
+              "label": "dono de"
+            }
+          ],
+          "caption": "Apagar o Deployment dispara cascata. Apagar só um Pod faz o ReplicaSet criar outro para voltar às 3 réplicas."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kubectl delete deploy web                      # cascata (padrão)\nkubectl delete deploy web --cascade=orphan     # preserva RS e Pods\nkubectl get pod web-7d9f6b-abc \\\n  -o jsonpath='{.metadata.ownerReferences[0].kind}'\n# ReplicaSet"
+        }
+      ]
+    },
+    {
+      "id": "pods",
+      "title": "Pods e seu ciclo de vida",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O **Pod** é a menor unidade implantável: um ou mais containers que **compartilham** rede (mesmo IP e portas), volumes e ciclo de vida, sempre agendados juntos no mesmo nó. Quase sempre há um container principal; os demais são auxiliares (sidecars, init containers)."
+        },
+        {
+          "type": "p",
+          "text": "Pods são **efêmeros e descartáveis**: têm IP próprio mas ele muda se o Pod for recriado, e ninguém o ressuscita — um controller cria *outro*. Por isso você raramente cria Pods diretamente; usa um Deployment, Job ou StatefulSet."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: demo\n  labels:\n    app: demo\nspec:\n  restartPolicy: Always\n  initContainers:\n    - name: espera-db\n      image: busybox:1.37\n      command: ['sh', '-c', 'until nc -z db 5432; do sleep 2; done']\n  containers:\n    - name: app\n      image: nginx:1.27\n      resources:\n        requests: { cpu: 100m, memory: 64Mi }\n        limits: { memory: 128Mi }",
+          "file": "pod.yaml"
+        },
+        {
+          "type": "h",
+          "text": "Fases (status.phase)"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Fase",
+            "Significado"
+          ],
+          "rows": [
+            [
+              "`Pending`",
+              "Aceito pela API, mas ainda não rodando: aguardando scheduler, volumes ou download da imagem"
+            ],
+            [
+              "`Running`",
+              "Atribuído a um nó e com ao menos um container em execução (ou reiniciando)"
+            ],
+            [
+              "`Succeeded`",
+              "Todos os containers terminaram com código 0 e não serão reiniciados (típico de Jobs)"
+            ],
+            [
+              "`Failed`",
+              "Todos terminaram e ao menos um falhou (código ≠ 0 ou morto pelo sistema)"
+            ],
+            [
+              "`Unknown`",
+              "Estado não obtido, em geral por perda de contato com o nó"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "A fase é um resumo grosseiro. O que realmente ajuda é a lista de **conditions** do Pod (`PodScheduled`, `Initialized`, `ContainersReady`, `Ready`) e o **estado de cada container**: `Waiting` (com motivo: `ContainerCreating`, `ImagePullBackOff`, `CrashLoopBackOff`), `Running` ou `Terminated` (com `exitCode` e motivo como `OOMKilled` ou `Completed`)."
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Admissão e scheduling",
+              "text": "Pod criado, `Pending`, sem nó até o scheduler decidir."
+            },
+            {
+              "title": "Init containers",
+              "text": "Rodam em ordem, um por vez, cada um até terminar com sucesso, antes dos containers principais."
+            },
+            {
+              "title": "Containers principais",
+              "text": "Iniciados; o kubelet executa `startupProbe`, `livenessProbe` e `readinessProbe` se configurados."
+            },
+            {
+              "title": "Término",
+              "text": "Ao apagar, o Pod vira `Terminating`: sai dos endpoints, recebe `SIGTERM` e tem `terminationGracePeriodSeconds` (30 s padrão) antes do `SIGKILL`."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Seu processo precisa tratar `SIGTERM` (parar de aceitar requisições, concluir o que estiver em andamento). Se o PID 1 do container ignorar sinais, cada deploy vai levar os 30 s inteiros e então perder conexões abruptamente.",
+          "title": "Término gracioso"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Containers **sidecar** nativos (`initContainers` com `restartPolicy: Always`) chegaram a GA no Kubernetes 1.33: iniciam antes do app, ficam rodando e encerram depois dele, resolvendo problemas antigos de ordem de inicialização em Jobs e service meshes.",
+          "title": "Sidecars de verdade"
+        }
+      ]
+    },
+    {
+      "id": "kubectl",
+      "title": "kubectl essencial",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O `kubectl` é o cliente de linha de comando da API. Dominar uns poucos verbos resolve a maior parte do dia a dia."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Comando",
+            "O que faz"
+          ],
+          "rows": [
+            [
+              "`kubectl get <tipo> [-n ns] [-A]`",
+              "Lista recursos; `-A` percorre todos os namespaces; `-w` acompanha mudanças"
+            ],
+            [
+              "`kubectl describe <tipo> <nome>`",
+              "Resumo legível + **Events**: primeiro lugar a olhar quando algo falha"
+            ],
+            [
+              "`kubectl apply -f arq.yaml`",
+              "Cria/atualiza de forma declarativa; aceita pasta (`-f dir/`) e URL"
+            ],
+            [
+              "`kubectl diff -f arq.yaml`",
+              "Mostra o que mudaria no cluster, sem aplicar"
+            ],
+            [
+              "`kubectl logs <pod> [-c ctr] [-f] [--previous]`",
+              "Logs; `--previous` pega o container que acabou de morrer"
+            ],
+            [
+              "`kubectl exec -it <pod> -- sh`",
+              "Executa comando dentro do container"
+            ],
+            [
+              "`kubectl explain <caminho>`",
+              "Documenta campos do schema direto da API (funciona offline com CRDs)"
+            ],
+            [
+              "`kubectl delete`, `scale`, `rollout`, `port-forward`",
+              "Remover, escalar, gerir atualizações, acessar um Pod da sua máquina"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "# Ver o objeto completo, como o cluster o enxerga\nkubectl get deploy web -o yaml\nkubectl get pods -o wide                 # IP e nó\nkubectl get pod web-x -o jsonpath='{.status.podIP}'\n\n# Descobrir campos sem abrir a documentação\nkubectl explain deploy.spec.strategy\nkubectl explain pod.spec.containers.livenessProbe --recursive\n\n# Gerar YAML base sem criar nada\nkubectl create deployment web --image=nginx:1.27 \\\n  --replicas=3 --dry-run=client -o yaml > deployment.yaml\n\n# Revisar antes de aplicar\nkubectl diff -f deployment.yaml\nkubectl apply -f deployment.yaml\nkubectl rollout status deploy/web\nkubectl wait --for=condition=Available deploy/web --timeout=60s"
+        },
+        {
+          "type": "h",
+          "text": "kubeconfig, contexts e namespaces"
+        },
+        {
+          "type": "p",
+          "text": "O `kubectl` descobre *qual* cluster usar no **kubeconfig** (`~/.kube/config`, ou a lista em `$KUBECONFIG`). Ele agrega três coisas: **clusters** (endereço e CA), **users** (credenciais) e **contexts** (combinação cluster + user + namespace padrão)."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: v1\nkind: Config\ncurrent-context: kind-lab\nclusters:\n  - name: kind-lab\n    cluster:\n      server: https://127.0.0.1:6443\n      certificate-authority-data: <base64>\nusers:\n  - name: kind-lab\n    user:\n      client-certificate-data: <base64>\n      client-key-data: <base64>\ncontexts:\n  - name: kind-lab\n    context:\n      cluster: kind-lab\n      user: kind-lab\n      namespace: lab",
+          "file": "~/.kube/config"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kubectl config get-contexts\nkubectl config use-context kind-lab\nkubectl config set-context --current --namespace=lab\nkubectl auth can-i create deployments -n lab"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Contextos são a causa clássica de acidentes: um `kubectl delete` no contexto de produção achando que era o de teste. Mostre o contexto no prompt do shell, use nomes explícitos e prefira `--context` / `-n` em scripts em vez de depender do contexto atual.",
+          "title": "Cuidado com o contexto atual"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "A versão do `kubectl` pode ficar a **uma minor** de distância do apiserver (para mais ou para menos). Fora disso, alguns campos e recursos podem se comportar de forma inesperada.",
+          "title": "Skew de versão"
+        }
+      ]
+    },
+    {
+      "id": "local",
+      "title": "Cluster local e mini-lab",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Para aprender, você não precisa de nuvem. Três ferramentas sobem um cluster Kubernetes completo no seu computador:"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Ferramenta",
+            "Como funciona",
+            "Quando usar"
+          ],
+          "rows": [
+            [
+              "**kind**",
+              "Cada nó é um container Docker/Podman rodando kubeadm + containerd",
+              "CI, testes de manifests, multi-nó leve e rápido"
+            ],
+            [
+              "**minikube**",
+              "Um nó em VM ou container; muitos addons (`minikube addons enable`)",
+              "Primeiros passos com UI e addons prontos"
+            ],
+            [
+              "**k3d**",
+              "Executa o **k3s** (distribuição leve) em containers Docker",
+              "Clusters minúsculos e rápidos; imita edge e homelab"
+            ]
+          ]
+        },
+        {
+          "type": "diagram",
+          "title": "kind: nós são containers",
+          "cols": 12,
+          "rows": 9.4,
+          "nodes": [
+            {
+              "id": "kc",
+              "label": "kubectl",
+              "x": 3.8,
+              "y": 0,
+              "w": 4.4,
+              "h": 2,
+              "sub": "kubeconfig"
+            },
+            {
+              "id": "cp",
+              "label": "control-plane",
+              "x": 0.3,
+              "y": 4.6,
+              "w": 5.2,
+              "h": 2,
+              "sub": "container kind"
+            },
+            {
+              "id": "w",
+              "label": "worker",
+              "x": 6.5,
+              "y": 4.6,
+              "w": 5.2,
+              "h": 2,
+              "sub": "container kind"
+            }
+          ],
+          "edges": [
+            {
+              "from": "kc",
+              "to": "cp",
+              "label": "API :6443",
+              "accent": true
+            },
+            {
+              "from": "cp",
+              "to": "w",
+              "dashed": true
+            }
+          ],
+          "groups": [
+            {
+              "label": "Docker no seu host",
+              "x": 0,
+              "y": 3.2,
+              "w": 12,
+              "h": 6,
+              "labelAt": "bottom"
+            }
+          ],
+          "caption": "O kind expõe o apiserver numa porta do host e grava um contexto `kind-<nome>` no seu kubeconfig."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: lab\nnodes:\n  - role: control-plane\n  - role: worker\n  - role: worker",
+          "file": "kind.yaml"
+        },
+        {
+          "type": "h",
+          "text": "Passo a passo"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Criar o cluster",
+              "text": "`kind create cluster --config kind.yaml`. Em ~1 minuto o contexto `kind-lab` estará ativo."
+            },
+            {
+              "title": "Criar um namespace e aplicar",
+              "text": "Aplique o `deployment.yaml` da seção de anatomia no namespace `lab`."
+            },
+            {
+              "title": "Ver a cadeia",
+              "text": "Liste Deployment, ReplicaSet e Pods, e em quais nós caíram."
+            },
+            {
+              "title": "Quebrar de propósito",
+              "text": "Apague um Pod e observe o ReplicaSet recriá-lo — a reconciliação em ação."
+            },
+            {
+              "title": "Atualizar e reverter",
+              "text": "Troque a imagem, acompanhe o rollout e faça rollback."
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kind create cluster --config kind.yaml\nkubectl cluster-info --context kind-lab\nkubectl create namespace lab\nkubectl config set-context --current --namespace=lab\n\nkubectl apply -f deployment.yaml\nkubectl get deploy,rs,pods -o wide\n\n# Autocura: apague um Pod e veja outro nascer\nkubectl delete $(kubectl get pod -l app=web -o name | head -1)\nkubectl get pods -w\n\n# Escala e rolling update\nkubectl scale deploy/web --replicas=5\nkubectl set image deploy/web web=nginx:1.28\nkubectl rollout status deploy/web\nkubectl rollout history deploy/web\nkubectl rollout undo deploy/web\n\n# Linha do tempo e limpeza\nkubectl get events --sort-by=.lastTimestamp\nkind delete cluster --name lab",
+          "file": "lab.sh"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Mantenha `kubectl get pods -w` aberto em outro terminal enquanto aplica e apaga coisas. Ver Pods `Terminating`, `ContainerCreating` e `Running` aparecendo ensina mais sobre os controllers que qualquer texto.",
+          "title": "Aprenda assistindo"
+        }
+      ]
+    },
+    {
+      "id": "api",
+      "title": "Grupos de API, versões e CRDs",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A API do Kubernetes é dividida em **grupos** versionados, para evoluir cada área sem quebrar as outras. Um recurso é endereçado por **grupo/versão** e **tipo**: `apps/v1` + `Deployment`. O grupo \"core\" (legado) tem caminho `/api/v1` e `apiVersion: v1` (Pod, Service, ConfigMap); os demais ficam em `/apis/<grupo>/<versão>`."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Grupo",
+            "apiVersion",
+            "Exemplos"
+          ],
+          "rows": [
+            [
+              "core",
+              "`v1`",
+              "Pod, Service, ConfigMap, Secret, Namespace, Node"
+            ],
+            [
+              "apps",
+              "`apps/v1`",
+              "Deployment, ReplicaSet, StatefulSet, DaemonSet"
+            ],
+            [
+              "batch",
+              "`batch/v1`",
+              "Job, CronJob"
+            ],
+            [
+              "networking.k8s.io",
+              "`networking.k8s.io/v1`",
+              "Ingress, NetworkPolicy"
+            ],
+            [
+              "rbac.authorization.k8s.io",
+              "`.../v1`",
+              "Role, ClusterRole, RoleBinding"
+            ],
+            [
+              "apiextensions.k8s.io",
+              "`.../v1`",
+              "CustomResourceDefinition"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "kubectl api-resources                 # tipos, grupo, escopo\nkubectl api-versions                  # grupo/versão disponíveis\nkubectl api-resources --namespaced=false\nkubectl explain hpa --api-version=autoscaling/v2"
+        },
+        {
+          "type": "h",
+          "text": "Maturidade e descontinuações"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**alpha** (`v1alpha1`) — experimental, desativado por padrão, pode mudar ou sumir.",
+            "**beta** (`v1beta1`) — mais estável, mas desde o 1.24 **novas APIs beta ficam desativadas por padrão**.",
+            "**GA/estável** (`v1`) — compatibilidade garantida; remoção exige longo período de depreciação."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "APIs descontinuadas são removidas de verdade: `extensions/v1beta1` Ingress sumiu no 1.22, `PodSecurityPolicy` foi removida no 1.25 (substituída por Pod Security Admission) e a API `Endpoints` está depreciada desde o 1.33 em favor de `EndpointSlice`. Rode `kubectl convert`/scanners (como `pluto`) antes de atualizar o cluster.",
+          "title": "Nem tudo dura"
+        },
+        {
+          "type": "h",
+          "text": "Estendendo a API: CRDs"
+        },
+        {
+          "type": "p",
+          "text": "Uma **CustomResourceDefinition** registra um novo tipo na API. Depois disso, o apiserver passa a armazenar, validar (via OpenAPI schema) e servir esse tipo como qualquer nativo, e `kubectl get` já funciona. Um **operador** é um controller que reconcilia esses recursos customizados — o mesmo padrão de loop das seções anteriores."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: backups.exemplo.dev\nspec:\n  group: exemplo.dev\n  scope: Namespaced\n  names: { kind: Backup, plural: backups, singular: backup }\n  versions:\n    - name: v1\n      served: true\n      storage: true\n      schema:\n        openAPIV3Schema:\n          type: object\n          properties:\n            spec:\n              type: object\n              required: [schedule]\n              properties:\n                schedule: { type: string }",
+          "file": "backup-crd.yaml"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "code": "apiVersion: exemplo.dev/v1\nkind: Backup\nmetadata:\n  name: diario\nspec:\n  schedule: \"0 3 * * *\"",
+          "file": "backup.yaml"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Cert-manager, Argo CD, Prometheus Operator, Gateway API e Crossplane são, no fundo, CRDs + controllers. Quando você entende o loop, entende todos eles.",
+          "title": "Onde você já viu isso"
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Consequência",
+            "Como evitar"
+          ],
+          "rows": [
+            [
+              "Criar Pods soltos",
+              "Sem controller, ninguém os recria se o nó cair",
+              "Use Deployment, StatefulSet ou Job"
+            ],
+            [
+              "Usar tag `latest`",
+              "Deploys não reprodutíveis; `imagePullPolicy` muda",
+              "Tags imutáveis ou digest (`@sha256:`)"
+            ],
+            [
+              "Sem `requests`/`limits`",
+              "Scheduler agenda às cegas; vizinhos ruidosos; OOM",
+              "Defina `requests` realistas; veja a parte 2"
+            ],
+            [
+              "Confundir `spec` e `status`",
+              "Editar status não faz nada",
+              "Edite só o `spec`; status é do controller"
+            ],
+            [
+              "Selector sobreposto",
+              "Dois controllers disputam os mesmos Pods",
+              "Labels distintos por carga de trabalho"
+            ],
+            [
+              "`kubectl edit`/`scale` em produção",
+              "Drift em relação ao Git; próxima aplicação desfaz",
+              "Mude o arquivo e reaplique; considere GitOps"
+            ],
+            [
+              "Contexto errado",
+              "Comando destrutivo no cluster errado",
+              "Prompt com contexto; `--context` explícito"
+            ],
+            [
+              "Ignorar Events",
+              "Horas procurando o que `describe` já dizia",
+              "Comece sempre por `describe` e `get events`"
+            ],
+            [
+              "Backup inexistente do etcd",
+              "Perda total em falha do control plane",
+              "Snapshot agendado e restauração testada"
+            ],
+            [
+              "Ignorar o SIGTERM",
+              "Conexões cortadas em cada deploy",
+              "Tratar o sinal; ajustar o grace period"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Heurística de diagnóstico: um Pod `Pending` é problema de **scheduler/recursos**; `ContainerCreating` é de **runtime/imagem/volume/CNI**; `CrashLoopBackOff` é **da aplicação**; `Running` mas sem tráfego é de **readiness/Service**.",
+          "title": "Onde olhar"
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "Cluster",
+              "def": "Conjunto de control plane e nós gerenciados como um sistema único."
+            },
+            {
+              "term": "Node",
+              "def": "Máquina (física ou virtual) que executa Pods; roda kubelet, runtime e kube-proxy."
+            },
+            {
+              "term": "Pod",
+              "def": "Menor unidade implantável: um ou mais containers com rede e volumes compartilhados."
+            },
+            {
+              "term": "Deployment",
+              "def": "Controller que gerencia ReplicaSets para manter N réplicas e fazer rollouts."
+            },
+            {
+              "term": "ReplicaSet",
+              "def": "Garante que exista o número desejado de Pods idênticos."
+            },
+            {
+              "term": "Controller",
+              "def": "Loop que reconcilia o estado observado com o desejado para um tipo de objeto."
+            },
+            {
+              "term": "Reconciliação",
+              "def": "Ato de comparar spec e realidade e aplicar a diferença; contínuo e level-triggered."
+            },
+            {
+              "term": "etcd",
+              "def": "Armazém chave-valor consistente (Raft) onde vive todo o estado do cluster."
+            },
+            {
+              "term": "Informer",
+              "def": "Componente do client-go que mantém cache local via list+watch e enfileira eventos."
+            },
+            {
+              "term": "resourceVersion",
+              "def": "Token opaco de versão de um objeto/lista; base do watch e da concorrência otimista."
+            },
+            {
+              "term": "Label / selector",
+              "def": "Par chave-valor usado para marcar objetos e consultas que os escolhem."
+            },
+            {
+              "term": "Namespace",
+              "def": "Escopo lógico de nomes, cotas e permissões dentro de um cluster."
+            },
+            {
+              "term": "ownerReference",
+              "def": "Vínculo filho→pai usado pelo garbage collector para remover em cascata."
+            },
+            {
+              "term": "CRI",
+              "def": "Container Runtime Interface: API gRPC entre kubelet e runtime (containerd, CRI-O)."
+            },
+            {
+              "term": "Admission controller",
+              "def": "Etapa da API que valida ou altera objetos antes da persistência."
+            },
+            {
+              "term": "CRD",
+              "def": "CustomResourceDefinition: registra um novo tipo de recurso na API."
+            },
+            {
+              "term": "Operador",
+              "def": "Controller que reconcilia recursos customizados, codificando conhecimento operacional."
+            },
+            {
+              "term": "kubeconfig",
+              "def": "Arquivo com clusters, usuários e contextos usados pelo kubectl."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Você agora tem o modelo mental: uma API declarativa, um banco consistente por trás, controllers em loop e agentes nos nós. Todo o resto do Kubernetes é variações desse padrão."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Parte 2 — Workloads, configuração, recursos e autoscaling:** Deployments e estratégias de rollout, StatefulSet, DaemonSet, Jobs, ConfigMaps/Secrets, requests e limits, probes, HPA/VPA.",
+            "**Parte 3 — Rede, armazenamento, segurança e troubleshooting:** Services, Ingress/Gateway API, DNS, volumes e PVCs, RBAC, Pod Security, depuração de incidentes."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Antes de seguir, faça o mini-lab e rode `kubectl get pods -w` enquanto apaga Pods e muda a imagem. Quando cada evento fizer sentido a partir do diagrama da seção 4, você está pronto para a parte 2.",
+          "title": "Exercício"
+        }
+      ]
+    }
+  ]
+}

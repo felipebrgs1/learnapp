@@ -1,0 +1,1536 @@
+{
+  "id": "go-2",
+  "title": "Go 2 — Concorrência",
+  "summary": "Goroutines, o scheduler GMP, canais, select, sync, context e os padrões para escrever concorrência correta e sem leaks em Go.",
+  "category": "Linguagens",
+  "level": "Intermediário",
+  "minutes": 34,
+  "updated": "out 2026",
+  "tags": [
+    "go",
+    "golang",
+    "concorrência",
+    "concurrency",
+    "goroutines",
+    "channels",
+    "canais",
+    "select",
+    "mutex",
+    "waitgroup",
+    "context",
+    "scheduler",
+    "gmp",
+    "paralelismo",
+    "data race",
+    "errgroup"
+  ],
+  "series": "Go",
+  "part": 2,
+  "sections": [
+    {
+      "id": "conc-vs-par",
+      "title": "Concorrência não é paralelismo",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Na parte 1 vimos a linguagem; aqui entramos no que fez o Go famoso: **concorrência** como recurso de primeira classe. Antes das ferramentas, a distinção que Rob Pike popularizou na palestra *Concurrency is not Parallelism* (2012):"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Concorrência** é uma propriedade da **estrutura** do programa: várias tarefas independentes que podem progredir em períodos sobrepostos, mesmo em um único núcleo. É sobre *lidar com* muitas coisas ao mesmo tempo.",
+            "**Paralelismo** é uma propriedade da **execução**: várias tarefas rodando literalmente no mesmo instante, em núcleos diferentes. É sobre *fazer* muitas coisas ao mesmo tempo."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Você projeta com concorrência; o runtime decide quanto paralelismo extrair do hardware. Um servidor HTTP é concorrente por natureza (cada requisição é uma tarefa independente) e se beneficia de paralelismo só se houver mais de um núcleo disponível. O contrário também vale: um programa pode ter paralelismo sem concorrência no código, como um laço vetorizado."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Go oferece três blocos de construção: **goroutines** (tarefas leves), **canais** (comunicação e sincronização entre elas) e **select** (esperar por vários eventos). Todo o resto — pipelines, pools, timeouts — é composição desses três, mais `sync` e `context`.",
+          "title": "Em uma frase"
+        },
+        {
+          "type": "h",
+          "text": "Por que isso importa para I/O e para CPU"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Carga limitada por I/O** (HTTP, banco, disco): milhares de goroutines esperando em paralelo custam quase nada, porque esperar não ocupa CPU. Aqui a concorrência vence mesmo com 1 núcleo.",
+            "**Carga limitada por CPU** (hash, compressão, parsing): o ganho vem do paralelismo e satura no número de núcleos (`GOMAXPROCS`). Mais goroutines que isso só adicionam troca de contexto."
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Mantra do Go: **\"Don't communicate by sharing memory; share memory by communicating.\"** Passe a *propriedade* dos dados por canais em vez de proteger estruturas compartilhadas com travas. É um guia, não uma lei: na seção de `sync` veremos quando um mutex é a ferramenta mais simples e correta."
+        }
+      ]
+    },
+    {
+      "id": "goroutines",
+      "title": "Goroutines",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Uma **goroutine** é uma função executando de forma independente, gerenciada pelo runtime do Go — não pelo sistema operacional. Criar uma é prefixar uma chamada com `go`; o chamador não espera."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func main() {\n    go imprime(\"em segundo plano\") // retorna imediatamente\n    fmt.Println(\"main continua\")\n    time.Sleep(100 * time.Millisecond) // gambiarra: veja abaixo\n}\n\nfunc imprime(s string) { fmt.Println(s) }"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Quando `main` retorna, o **processo inteiro termina** e todas as goroutines são mortas, terminadas ou não. `time.Sleep` para \"esperar\" é um bug esperando para acontecer: use `sync.WaitGroup`, um canal ou `errgroup` para sincronizar o fim.",
+          "title": "main não espera ninguém"
+        },
+        {
+          "type": "h",
+          "text": "Por que são baratas"
+        },
+        {
+          "type": "p",
+          "text": "Uma thread do SO reserva uma pilha de tamanho fixo (tipicamente 8 MB de memória virtual no Linux) e cada troca de contexto passa pelo kernel. Uma goroutine começa com uma pilha de **~2 KB** que **cresce e encolhe dinamicamente**: quando a função precisa de mais espaço, o runtime aloca uma pilha maior (o dobro), **copia** a antiga e ajusta os ponteiros. Trocar de goroutine acontece no espaço do usuário, salvando poucos registradores, sem chamar o kernel."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "",
+            "Thread do SO",
+            "Goroutine"
+          ],
+          "rows": [
+            [
+              "Pilha inicial",
+              "~1–8 MB reservados (virtual)",
+              "~2 KB, cresce sob demanda (máx. 1 GB em 64 bits)"
+            ],
+            [
+              "Criação",
+              "Syscall; dezenas de µs",
+              "Alocação no runtime; fração de µs"
+            ],
+            [
+              "Troca de contexto",
+              "Kernel; ~µs, esvazia caches/TLB",
+              "Espaço do usuário; centenas de ns"
+            ],
+            [
+              "Escalonamento",
+              "Preemptivo pelo kernel",
+              "Cooperativo + preemptivo pelo runtime"
+            ],
+            [
+              "Quantidade prática",
+              "Milhares",
+              "Centenas de milhares a milhões"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Esses números são ordens de grandeza (variam por SO e hardware), mas explicam o estilo de programação: em Go você usa **uma goroutine por tarefa** (por conexão, por requisição) em vez de reciclar um pequeno pool de threads com callbacks."
+        },
+        {
+          "type": "h",
+          "text": "Closures e a variável do laço"
+        },
+        {
+          "type": "p",
+          "text": "Desde o Go 1.22, cada iteração de um `for` tem sua **própria cópia** da variável do laço. O bug clássico de todas as goroutines enxergarem o último valor de `i` deixou de existir (para módulos com `go 1.22` ou superior no `go.mod`)."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "for i := range 3 { // range sobre inteiro: Go 1.22\n    go func() { fmt.Println(i) }() // cada goroutine vê o seu i\n}"
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "Um `panic` não tratado em **qualquer** goroutine derruba o processo inteiro, e `recover` só funciona na **própria** goroutine que entrou em pânico. Em servidores, goroutines de longa duração costumam ter um `defer` com `recover` que registra o erro e as converte em falha controlada.",
+          "title": "Panic não atravessa goroutines"
+        }
+      ]
+    },
+    {
+      "id": "scheduler",
+      "title": "O scheduler: modelo GMP",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "O runtime multiplexa milhões de goroutines sobre poucas threads com o **modelo GMP**, implementado em `runtime/proc.go`. São três entidades:"
+        },
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "G (goroutine)",
+              "def": "A tarefa: pilha, ponteiro de instrução e estado (runnable, running, waiting...)."
+            },
+            {
+              "term": "M (machine)",
+              "def": "Uma thread do SO. Só executa Go se estiver associada a um P."
+            },
+            {
+              "term": "P (processor)",
+              "def": "Um \"direito de executar Go\": contém a fila local de Gs prontas e caches de alocação. O número de Ps é `GOMAXPROCS`."
+            }
+          ]
+        },
+        {
+          "type": "p",
+          "text": "A separação P/M é a ideia-chave: quem limita o paralelismo de código Go são os **Ps**, não as threads. Ms extras existem para cobrir chamadas bloqueantes, mas sem um P elas não rodam Go."
+        },
+        {
+          "type": "diagram",
+          "title": "Modelo GMP",
+          "cols": 12,
+          "rows": 14.5,
+          "nodes": [
+            {
+              "id": "gq",
+              "label": "Fila global",
+              "x": 3.5,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "Gs sem dono · lock"
+            },
+            {
+              "id": "p0",
+              "label": "P0",
+              "x": 0,
+              "y": 4,
+              "w": 5,
+              "h": 2,
+              "sub": "fila local (256)"
+            },
+            {
+              "id": "p1",
+              "label": "P1",
+              "x": 7,
+              "y": 4,
+              "w": 5,
+              "h": 2,
+              "sub": "fila local (256)"
+            },
+            {
+              "id": "m0",
+              "label": "M0",
+              "x": 0,
+              "y": 8,
+              "w": 5,
+              "h": 2,
+              "sub": "thread do SO"
+            },
+            {
+              "id": "m1",
+              "label": "M1",
+              "x": 7,
+              "y": 8,
+              "w": 5,
+              "h": 2,
+              "sub": "thread do SO"
+            },
+            {
+              "id": "net",
+              "label": "Netpoller",
+              "x": 0,
+              "y": 12,
+              "w": 5,
+              "h": 2,
+              "sub": "epoll · kqueue",
+              "variant": "accent"
+            },
+            {
+              "id": "sys",
+              "label": "Syscall",
+              "x": 7,
+              "y": 12,
+              "w": 5,
+              "h": 2,
+              "sub": "bloqueante",
+              "variant": "dashed"
+            }
+          ],
+          "edges": [
+            {
+              "from": "gq",
+              "to": "p0"
+            },
+            {
+              "from": "gq",
+              "to": "p1"
+            },
+            {
+              "from": "p0",
+              "to": "p1",
+              "label": "rouba ½",
+              "dashed": true,
+              "both": true
+            },
+            {
+              "from": "p0",
+              "to": "m0",
+              "label": "P↔M",
+              "both": true
+            },
+            {
+              "from": "p1",
+              "to": "m1",
+              "label": "P↔M",
+              "both": true
+            },
+            {
+              "from": "m0",
+              "to": "net",
+              "label": "I/O",
+              "accent": true
+            },
+            {
+              "from": "m1",
+              "to": "sys",
+              "label": "handoff",
+              "dashed": true
+            }
+          ],
+          "caption": "Cada P tem uma fila local; a global recebe o excesso. P ocioso rouba metade da fila de outro P. Em syscall bloqueante, o P é entregue a outra M."
+        },
+        {
+          "type": "h",
+          "text": "Como um P encontra trabalho"
+        },
+        {
+          "type": "steps",
+          "items": [
+            {
+              "title": "Fila local",
+              "text": "Primeiro o slot `runnext` (a goroutine recém-criada ou acordada, para preservar localidade de cache) e depois a fila local de até 256 Gs."
+            },
+            {
+              "title": "Fila global",
+              "text": "A cada 61 ticks do scheduler o P olha a fila global antes da local, para que ela não passe fome."
+            },
+            {
+              "title": "Netpoller",
+              "text": "Sockets prontos (via epoll/kqueue/IOCP) viram Gs runnable. I/O de rede **não** consome uma thread por conexão."
+            },
+            {
+              "title": "Work stealing",
+              "text": "Sem nada a fazer, o P escolhe vítimas aleatórias e **rouba metade** da fila local delas. Ms nessa busca ficam \"spinning\" brevemente antes de dormir."
+            }
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Syscalls e I/O"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Rede**: não-bloqueante e integrada ao netpoller. A G se estaciona (estado waiting) e a M segue executando outras Gs.",
+            "**Syscall bloqueante** (arquivo, cgo, algumas chamadas do SO): a M fica presa no kernel. A thread de monitoramento `sysmon` percebe (após ~20 µs) e faz **handoff**: o P é desvinculado e entregue a outra M, para que as demais Gs continuem. Quando a syscall volta, a G tenta recuperar um P ou vai para a fila global.",
+            "Por isso o número de **threads** pode ser bem maior que `GOMAXPROCS` (limite padrão de 10 000 threads, ajustável com `debug.SetMaxThreads`), enquanto o paralelismo de código Go segue limitado ao número de Ps."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Preempção"
+        },
+        {
+          "type": "p",
+          "text": "Antes do Go 1.14, uma goroutine só cedia o P em pontos \"seguros\" (chamadas de função, canais, locks). Um laço apertado sem chamadas travava o scheduler e o GC. Desde o **1.14** há **preempção assíncrona**: o `sysmon` marca como candidata uma G que roda por mais de ~10 ms e envia um sinal (`SIGURG` no Linux) à thread, que a suspende em um ponto seguro. Hoje o código `for {}` não congela o resto do programa."
+        },
+        {
+          "type": "h",
+          "text": "GOMAXPROCS"
+        },
+        {
+          "type": "p",
+          "text": "`GOMAXPROCS` define o número de Ps. O padrão sempre foi o número de CPUs lógicas visíveis; em containers isso era uma armadilha, porque o processo enxergava os 64 núcleos do host mesmo com limite de 2 CPUs no cgroup, e sofria **throttling** de CFS (a cota esgota no meio do período e todas as threads param)."
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Desde o **Go 1.25**, o runtime é **ciente de containers**: no Linux o padrão passa a ser o menor entre as CPUs lógicas e o **limite de CPU do cgroup** (arredondado para cima), e é atualizado se o limite mudar durante a execução. Não se aplica se você definir `GOMAXPROCS` (variável ou `runtime.GOMAXPROCS`) nem se o `go.mod` declarar versão anterior à 1.25. Em versões antigas, use `go.uber.org/automaxprocs`. Note que isso considera o *limit*, não o *request*.",
+          "title": "Container-aware"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "import \"runtime\"\n\nn := runtime.GOMAXPROCS(0) // 0 = só consulta, não altera\nfmt.Println(\"Ps:\", n, \"CPUs:\", runtime.NumCPU(),\n    \"goroutines:\", runtime.NumGoroutine())"
+        }
+      ]
+    },
+    {
+      "id": "canais",
+      "title": "Canais",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um **canal** é um tubo tipado e seguro para concorrência, com semântica de fila FIFO. Ele serve a dois propósitos ao mesmo tempo: **transferir valores** e **sincronizar** as goroutines envolvidas. Internamente é uma estrutura `hchan` com buffer circular, trava e filas de goroutines esperando para enviar e receber."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "ch := make(chan int)     // sem buffer\nbuf := make(chan int, 3) // buffer de 3\n\ngo func() { ch <- 42 }() // envia\nv := <-ch                // recebe (bloqueia até haver um envio)"
+        },
+        {
+          "type": "h",
+          "text": "Sem buffer × com buffer"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "",
+            "Sem buffer (`make(chan T)`)",
+            "Com buffer (`make(chan T, n)`)"
+          ],
+          "rows": [
+            [
+              "Envio bloqueia quando",
+              "não há receptor pronto",
+              "o buffer está cheio"
+            ],
+            [
+              "Recebimento bloqueia quando",
+              "não há emissor pronto",
+              "o buffer está vazio"
+            ],
+            [
+              "Garantia",
+              "**Rendezvous**: envio e recebimento acontecem juntos; o emissor sabe que o valor foi entregue",
+              "Desacopla ritmos; o emissor só sabe que foi *enfileirado*"
+            ],
+            [
+              "Uso típico",
+              "Sincronização, handoff, sinal de término",
+              "Absorver rajadas, semáforo, resultado de 1 posição"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "Buffer não é remédio para deadlock: só adia o problema até encher. Dimensione o buffer por um motivo concreto (nº de produtores, tamanho de rajada). Buffer 1 é comum para garantir que uma goroutine nunca fique presa no envio (veja \"leaks\").",
+          "title": "Não use buffer para \"fazer parar de travar\""
+        },
+        {
+          "type": "h",
+          "text": "Direção"
+        },
+        {
+          "type": "p",
+          "text": "Tipos de canal podem restringir o uso: `chan<- T` só envia, `<-chan T` só recebe. Um `chan T` converte implicitamente para qualquer um; o inverso não. É documentação verificada pelo compilador: a função que só consome não consegue fechar nem enviar."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func produz(n int) <-chan int { // quem chama só pode receber\n    out := make(chan int)\n    go func() {\n        defer close(out)\n        for i := range n {\n            out <- i\n        }\n    }()\n    return out\n}\n\nfunc consome(in <-chan int) { // não consegue enviar nem fechar\n    for v := range in { // sai quando in é fechado e esvaziado\n        fmt.Println(v)\n    }\n}"
+        },
+        {
+          "type": "h",
+          "text": "Fechar um canal"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`close(ch)` sinaliza \"não virão mais valores\". Não libera memória (o GC cuida disso); é um **evento de comunicação**.",
+            "Quem **envia** fecha — nunca quem recebe. Enviar em canal fechado causa `panic`. Com vários emissores, coordene com `WaitGroup` e feche em uma goroutine à parte (veja worker pool).",
+            "Receber de canal fechado **não bloqueia**: devolve primeiro o que sobrou no buffer e depois o valor zero com `ok == false` (`v, ok := <-ch`).",
+            "Fechar é um broadcast: **todos** os receptores bloqueados acordam. É por isso que `ctx.Done()` é um canal que se fecha."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Tabela de operações"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Operação",
+            "Canal nil",
+            "Aberto",
+            "Fechado"
+          ],
+          "rows": [
+            [
+              "`ch <- v`",
+              "bloqueia para sempre",
+              "bloqueia até haver espaço/receptor",
+              "**panic**"
+            ],
+            [
+              "`<-ch`",
+              "bloqueia para sempre",
+              "bloqueia até haver valor",
+              "zero, `ok=false` (após esvaziar o buffer)"
+            ],
+            [
+              "`close(ch)`",
+              "**panic**",
+              "fecha",
+              "**panic**"
+            ],
+            [
+              "`len` / `cap`",
+              "0 / 0",
+              "itens no buffer / capacidade",
+              "itens restantes / capacidade"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "O canal **nil** parece só uma armadilha, mas é uma ferramenta: um `case` num `select` com canal nil **nunca fica pronto**, então atribuir `nil` à variável desliga aquele ramo dinamicamente (exemplo na próxima seção).",
+          "title": "nil é útil"
+        }
+      ]
+    },
+    {
+      "id": "select",
+      "title": "select",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "`select` espera por **várias** operações de canal ao mesmo tempo e executa a primeira que estiver pronta. Se várias estiverem prontas, escolhe **uma ao acaso (distribuição uniforme)** — é isso que evita starvation de um canal por outro. Sem nenhuma pronta, bloqueia; com `default`, não bloqueia."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "select {\ncase v := <-dados:\n    process(v)\ncase err := <-erros:\n    return err\ncase <-ctx.Done():\n    return ctx.Err()\ndefault: // opcional: torna o select não-bloqueante\n    // nada pronto agora\n}"
+        },
+        {
+          "type": "h",
+          "text": "Padrões essenciais"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Timeout**: `case <-time.After(d)`, ou melhor, um `context.WithTimeout` que valha para a operação inteira.",
+            "**Envio não-bloqueante**: `select { case ch <- v: default: /* descarta */ }` — útil para métricas e eventos que podem ser perdidos.",
+            "**Cancelamento**: todo envio/recebimento potencialmente bloqueante em goroutine de longa vida deve ter um `case <-ctx.Done()` ao lado.",
+            "`select {}` (vazio) bloqueia para sempre; `for { select {...} }` é o laço de eventos idiomático."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Mesclando canais com nil"
+        },
+        {
+          "type": "p",
+          "text": "Quando um canal fecha, ele fica sempre \"pronto\" e o laço giraria sem parar. A solução é atribuir `nil` a ele depois de fechado:"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"time\"\n)\n\nfunc main() {\n\ta, b := make(chan int), make(chan int)\n\tgo func() { a <- 1; a <- 2; close(a) }()\n\tgo func() { b <- 10; close(b) }()\n\n\ttimeout := time.NewTimer(time.Second)\n\tdefer timeout.Stop()\n\n\tfor a != nil || b != nil {\n\t\tselect {\n\t\tcase v, ok := <-a:\n\t\t\tif !ok {\n\t\t\t\ta = nil // canal nil nunca fica pronto: sai do select\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tfmt.Println(\"a\", v)\n\t\tcase v, ok := <-b:\n\t\t\tif !ok {\n\t\t\t\tb = nil\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tfmt.Println(\"b\", v)\n\t\tcase <-timeout.C:\n\t\t\tfmt.Println(\"timeout\")\n\t\t\treturn\n\t\t}\n\t}\n}",
+          "file": "merge.go"
+        },
+        {
+          "type": "h",
+          "text": "time.After × time.NewTimer"
+        },
+        {
+          "type": "p",
+          "text": "`time.After(d)` cria um timer a cada chamada. Antes do Go 1.23, em um laço quente isso acumulava timers que só eram coletados após disparar. Desde o **Go 1.23** (para módulos com `go 1.23`+) timers não referenciados são coletáveis mesmo sem `Stop`, e os canais de timer passaram a ter semântica síncrona (sem buffer): depois de `Stop` ou `Reset` você **nunca** recebe um valor velho."
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Ainda assim, em laços que repetem a espera, prefira **um** `time.NewTimer` reutilizado com `Reset` (menos alocações) e `defer t.Stop()`. Para limitar o tempo de uma operação com chamadas aninhadas, `context.WithTimeout` é mais correto porque propaga a todos os níveis.",
+          "title": "Boa prática"
+        }
+      ]
+    },
+    {
+      "id": "sync",
+      "title": "Pacotes sync e sync/atomic",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Canais são ótimos para passar dados e coordenar fluxos. Para **proteger estado compartilhado** (um cache, um contador, uma tabela) uma trava costuma ser mais simples, mais rápida e mais legível. O pacote `sync` fornece as primitivas."
+        },
+        {
+          "type": "h",
+          "text": "Mutex e RWMutex"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`sync.Mutex`: exclusão mútua. Zero value pronto para uso. **Nunca copie** um mutex depois do primeiro uso (`go vet` avisa via `copylocks`) — guarde-o em struct usada por ponteiro.",
+            "Padrão: `mu.Lock(); defer mu.Unlock()`. Mantenha a seção crítica **curta** e sem I/O ou chamadas desconhecidas que possam tomar a mesma trava (mutexes do Go **não são reentrantes**: tomar a trava duas vezes na mesma goroutine é deadlock).",
+            "`sync.RWMutex`: muitos leitores *ou* um escritor. Só compensa quando a seção crítica de leitura é cara e as leituras dominam; em seções pequenas, o `Mutex` simples costuma ganhar por ter menos overhead."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n\t\"sync/atomic\"\n)\n\ntype Cache struct {\n\tmu sync.RWMutex\n\tm  map[string]int\n}\n\nfunc (c *Cache) Get(k string) (int, bool) {\n\tc.mu.RLock()\n\tdefer c.mu.RUnlock()\n\tv, ok := c.m[k]\n\treturn v, ok\n}\n\nfunc (c *Cache) Set(k string, v int) {\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tc.m[k] = v\n}\n\nvar config = sync.OnceValue(func() map[string]string {\n\tfmt.Println(\"carregando...\") // roda uma única vez\n\treturn map[string]string{\"env\": \"prod\"}\n})\n\nfunc main() {\n\tvar hits atomic.Int64\n\tvar wg sync.WaitGroup\n\tc := &Cache{m: map[string]int{}}\n\tfor i := range 50 {\n\t\twg.Go(func() {\n\t\t\tc.Set(\"k\", i)\n\t\t\thits.Add(1)\n\t\t\t_ = config()[\"env\"]\n\t\t})\n\t}\n\twg.Wait()\n\t_, ok := c.Get(\"k\")\n\tfmt.Println(hits.Load(), ok, config()[\"env\"])\n}",
+          "file": "cache.go"
+        },
+        {
+          "type": "h",
+          "text": "WaitGroup"
+        },
+        {
+          "type": "p",
+          "text": "Espera um conjunto de goroutines terminar. O contador é incrementado **antes** de lançar a goroutine (nunca dentro dela) e decrementado ao fim. O **Go 1.25** adicionou `wg.Go(f)`, que faz `Add(1)`, inicia a goroutine e chama `Done` ao retornar, eliminando uma fonte clássica de erros:"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n)\n\nfunc main() {\n\tvar wg sync.WaitGroup\n\tvar mu sync.Mutex\n\tsoma := 0\n\tfor i := 1; i <= 10; i++ {\n\t\twg.Go(func() { // Go 1.25: Add(1) + go + defer Done()\n\t\t\tmu.Lock()\n\t\t\tdefer mu.Unlock()\n\t\t\tsoma += i // i é por iteração desde o Go 1.22\n\t\t})\n\t}\n\twg.Wait()\n\tfmt.Println(soma) // 55\n}",
+          "file": "waitgroup.go"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "`wg.Go` aceita `func()` sem retorno. Se as tarefas podem falhar e você quer propagar o primeiro erro e cancelar as demais, o caminho é o `errgroup` (próxima seção de padrões).",
+          "title": "Sem erros"
+        },
+        {
+          "type": "h",
+          "text": "Once, OnceFunc, OnceValue"
+        },
+        {
+          "type": "p",
+          "text": "Garantem execução única, segura entre goroutines — e quem chegar depois **espera** a primeira terminar. Inicialização preguiçosa de config, conexões, regex. Desde o Go 1.21, `sync.OnceFunc`, `OnceValue` e `OnceValues` retornam uma função memorizada; se a função original der `panic`, o mesmo panic é repetido nas chamadas seguintes. Um exemplo de `OnceValue` está no cache acima."
+        },
+        {
+          "type": "h",
+          "text": "sync/atomic"
+        },
+        {
+          "type": "p",
+          "text": "Operações atômicas sobre inteiros, ponteiros e booleanos, sem trava. Use os **tipos** (Go 1.19+): `atomic.Int64`, `atomic.Bool`, `atomic.Pointer[T]`, `atomic.Value`. São mais seguros que as funções soltas (`atomic.AddInt64(&x, 1)`), pois impedem acesso não-atômico acidental e garantem o alinhamento. Todas as operações atômicas do Go são **sequencialmente consistentes**."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var reqs atomic.Int64\nreqs.Add(1)               // contador\nn := reqs.Load()\n\nvar cfg atomic.Pointer[Config]   // troca atômica de snapshot imutável\ncfg.Store(&Config{Debug: true})\ncur := cfg.Load()                // leitores nunca veem estado parcial\n\nvar pronto atomic.Bool\npronto.CompareAndSwap(false, true) // true só para quem ganhou"
+        },
+        {
+          "type": "h",
+          "text": "Cond, Pool e Map"
+        },
+        {
+          "type": "list",
+          "items": [
+            "`sync.Cond`: esperar por uma **condição** sobre estado protegido por mutex (`Wait` em laço + `Broadcast`). Raro: um canal fechado ou um `context` resolvem a maioria dos casos.",
+            "`sync.Pool`: cache de objetos temporários para reduzir alocação (buffers). O GC pode esvaziá-lo a qualquer momento; nunca guarde estado que precise sobreviver.",
+            "`sync.Map`: mapa concorrente **sem tipos** (`any`). Só vale para dois padrões: chaves escritas uma vez e lidas muitas vezes, ou goroutines que acessam conjuntos de chaves disjuntos. Para o resto, um `map` + `RWMutex`/`Mutex` com tipos concretos é mais claro e geralmente tão rápido. (O Go 1.24 trocou a implementação interna por uma hash-trie, melhorando o desempenho, mas a recomendação de uso permanece.)"
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Quando usar o quê"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Situação",
+            "Ferramenta",
+            "Por quê"
+          ],
+          "rows": [
+            [
+              "Transferir propriedade de dados / pipeline",
+              "Canal",
+              "Comunicação e sincronização no mesmo ato"
+            ],
+            [
+              "Proteger estado compartilhado (cache, contadores)",
+              "Mutex",
+              "Mais simples e rápido que um goroutine \"dona\" do estado"
+            ],
+            [
+              "Contador ou flag simples",
+              "`atomic`",
+              "Sem trava, sem alocação"
+            ],
+            [
+              "Esperar N tarefas",
+              "`WaitGroup` / `errgroup`",
+              "Contagem explícita de término"
+            ],
+            [
+              "Cancelar / prazo em árvore de chamadas",
+              "`context`",
+              "Propagação padronizada"
+            ],
+            [
+              "Inicialização única",
+              "`sync.Once*`",
+              "Thread-safe e memoizado"
+            ]
+          ]
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Custo aproximado por operação, sem contenção",
+          "unit": "ns",
+          "bars": [
+            {
+              "label": "atomic.Int64.Add",
+              "value": 5,
+              "display": "~5 ns"
+            },
+            {
+              "label": "Mutex Lock/Unlock",
+              "value": 20,
+              "display": "~20 ns"
+            },
+            {
+              "label": "Envio+recepção em canal com buffer",
+              "value": 80,
+              "display": "~80 ns"
+            },
+            {
+              "label": "Canal sem buffer entre 2 goroutines",
+              "value": 200,
+              "display": "~200 ns"
+            }
+          ],
+          "caption": "Valores **ilustrativos** (ordem de grandeza em CPU x86 moderna). Meça com `go test -bench` no seu caso: com contenção alta os números mudam bastante."
+        }
+      ]
+    },
+    {
+      "id": "context",
+      "title": "context: cancelamento e prazos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Um `context.Context` carrega três coisas através de fronteiras de API e de goroutines: **sinal de cancelamento**, **prazo** e **valores** escopados à requisição. É a forma padrão de dizer a uma árvore de goroutines \"pare, ninguém mais precisa do resultado\"."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "type Context interface {\n    Deadline() (deadline time.Time, ok bool)\n    Done() <-chan struct{} // fecha ao cancelar / expirar\n    Err() error            // Canceled ou DeadlineExceeded\n    Value(key any) any\n}"
+        },
+        {
+          "type": "p",
+          "text": "Contextos formam uma **árvore imutável**: cada `With*` cria um filho. Cancelar um nó cancela **todos os descendentes**, nunca os ancestrais nem os irmãos."
+        },
+        {
+          "type": "diagram",
+          "title": "Propagação do cancelamento",
+          "cols": 12,
+          "rows": 11,
+          "nodes": [
+            {
+              "id": "bg",
+              "label": "Background",
+              "x": 3.5,
+              "y": 0,
+              "w": 5,
+              "h": 2,
+              "sub": "raiz, nunca cancela",
+              "variant": "muted"
+            },
+            {
+              "id": "req",
+              "label": "WithCancel",
+              "x": 3.5,
+              "y": 4,
+              "w": 5,
+              "h": 2,
+              "sub": "ctx da requisição",
+              "variant": "accent"
+            },
+            {
+              "id": "db",
+              "label": "WithTimeout",
+              "x": 0.1,
+              "y": 8.5,
+              "w": 3.8,
+              "h": 2,
+              "sub": "query DB"
+            },
+            {
+              "id": "tr",
+              "label": "WithValue",
+              "x": 4.1,
+              "y": 8.5,
+              "w": 3.8,
+              "h": 2,
+              "sub": "trace-id"
+            },
+            {
+              "id": "wk",
+              "label": "WithDeadline",
+              "x": 8.1,
+              "y": 8.5,
+              "w": 3.8,
+              "h": 2,
+              "sub": "worker"
+            }
+          ],
+          "edges": [
+            {
+              "from": "bg",
+              "to": "req"
+            },
+            {
+              "from": "req",
+              "to": "db"
+            },
+            {
+              "from": "req",
+              "to": "tr"
+            },
+            {
+              "from": "req",
+              "to": "wk"
+            }
+          ],
+          "caption": "Chamar o cancel de `req` fecha o `Done()` dos três filhos. Cancelar `db` (ou ele expirar) não afeta `req` nem os irmãos."
+        },
+        {
+          "type": "h",
+          "text": "Construtores"
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Função",
+            "Para quê"
+          ],
+          "rows": [
+            [
+              "`WithCancel(parent)`",
+              "Cancelamento manual; devolve `cancel`"
+            ],
+            [
+              "`WithTimeout(parent, d)`",
+              "Cancela após uma duração; `Err()` = `DeadlineExceeded`"
+            ],
+            [
+              "`WithDeadline(parent, t)`",
+              "Idem, com instante absoluto. Nunca estende o prazo do pai"
+            ],
+            [
+              "`WithCancelCause(parent)`",
+              "`cancel(err)` registra a causa; `context.Cause(ctx)` a lê (Go 1.20)"
+            ],
+            [
+              "`WithTimeoutCause` / `WithDeadlineCause`",
+              "Define a causa quando o prazo estoura (Go 1.21)"
+            ],
+            [
+              "`WithoutCancel(parent)`",
+              "Mantém os valores mas ignora o cancelamento do pai (ex.: auditoria pós-resposta)"
+            ],
+            [
+              "`AfterFunc(ctx, f)`",
+              "Agenda `f` em goroutine própria quando `ctx` terminar; devolve `stop` (Go 1.21)"
+            ],
+            [
+              "`WithValue(parent, k, v)`",
+              "Valor escopado à requisição"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"fmt\"\n\t\"time\"\n)\n\nvar ErrQuota = errors.New(\"cota excedida\")\n\nfunc main() {\n\tctx, cancel := context.WithCancelCause(context.Background())\n\tstop := context.AfterFunc(ctx, func() { fmt.Println(\"limpeza\") })\n\tdefer stop() // desregistra se ainda não disparou\n\n\tchild, cancel2 := context.WithTimeout(ctx, time.Hour)\n\tdefer cancel2()\n\n\tcancel(ErrQuota)\n\t<-child.Done()\n\tfmt.Println(child.Err())          // context canceled\n\tfmt.Println(context.Cause(child)) // cota excedida\n\tfmt.Println(errors.Is(context.Cause(child), ErrQuota))\n\ttime.Sleep(10 * time.Millisecond)\n}",
+          "file": "causa.go"
+        },
+        {
+          "type": "h",
+          "text": "Regras que evitam dor de cabeça"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Primeiro parâmetro**, chamado `ctx`: `func Busca(ctx context.Context, id string) (T, error)`.",
+            "**Não guarde** `Context` em structs: ele é escopo de uma chamada. (Exceção: tipos que *são* uma requisição, como `http.Request`.)",
+            "**Sempre chame `cancel`** (normalmente com `defer`), mesmo no caminho feliz: libera o timer e o registro no pai. `go vet` (analisador `lostcancel`) reclama quando você esquece.",
+            "Nunca passe `nil`; sem contexto real use `context.Background()` (raiz do programa) ou `context.TODO()` (marcador de \"ainda vou propagar\").",
+            "`WithValue` é para dados que atravessam APIs (trace id, usuário autenticado), **não** para parâmetros opcionais. Use um tipo não exportado como chave para evitar colisões.",
+            "Honre o cancelamento: loops longos e I/O devem observar `ctx.Done()`; bibliotecas como `database/sql` e `net/http` já aceitam `ctx` (`QueryContext`, `NewRequestWithContext`)."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "padroes",
+      "title": "Padrões: worker pool, pipeline, fan-out/fan-in",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Com goroutines, canais e `context` você monta praticamente qualquer topologia. Estes são os formatos que se repetem."
+        },
+        {
+          "type": "h",
+          "text": "Worker pool"
+        },
+        {
+          "type": "p",
+          "text": "Um número **fixo** de workers consome tarefas de um canal. Limita o uso de recursos e dá contrapressão natural: o produtor bloqueia se os workers estão ocupados. Três regras de término: o produtor fecha `jobs`; os workers saem do `range`; uma goroutine à parte espera os workers e fecha `out`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n)\n\ntype Result struct {\n\tID, Square int\n}\n\nfunc worker(jobs <-chan int, out chan<- Result) {\n\tfor n := range jobs { // termina quando jobs é fechado e esvaziado\n\t\tout <- Result{n, n * n}\n\t}\n}\n\nfunc main() {\n\tjobs := make(chan int)\n\tout := make(chan Result)\n\n\tvar wg sync.WaitGroup\n\tfor range 4 {\n\t\twg.Go(func() { worker(jobs, out) })\n\t}\n\n\tgo func() { // produtor: quem envia é quem fecha\n\t\tdefer close(jobs)\n\t\tfor i := 1; i <= 8; i++ {\n\t\t\tjobs <- i\n\t\t}\n\t}()\n\n\tgo func() { // fecha out quando todos os workers saírem\n\t\twg.Wait()\n\t\tclose(out)\n\t}()\n\n\ttotal := 0\n\tfor r := range out {\n\t\ttotal += r.Square\n\t}\n\tfmt.Println(total) // 204\n}",
+          "file": "pool.go"
+        },
+        {
+          "type": "diagram",
+          "title": "Fan-out / fan-in",
+          "cols": 12,
+          "rows": 14.5,
+          "nodes": [
+            {
+              "id": "gen",
+              "label": "gen",
+              "x": 4,
+              "y": 0,
+              "w": 4,
+              "h": 2,
+              "sub": "produtor",
+              "variant": "accent"
+            },
+            {
+              "id": "w1",
+              "label": "worker 1",
+              "x": 0.2,
+              "y": 4,
+              "w": 3.6,
+              "h": 2
+            },
+            {
+              "id": "w2",
+              "label": "worker 2",
+              "x": 4.2,
+              "y": 4,
+              "w": 3.6,
+              "h": 2
+            },
+            {
+              "id": "w3",
+              "label": "worker 3",
+              "x": 8.2,
+              "y": 4,
+              "w": 3.6,
+              "h": 2
+            },
+            {
+              "id": "mg",
+              "label": "merge",
+              "x": 4,
+              "y": 8.5,
+              "w": 4,
+              "h": 2,
+              "sub": "wg + close"
+            },
+            {
+              "id": "cons",
+              "label": "consumidor",
+              "x": 4,
+              "y": 12.5,
+              "w": 4,
+              "h": 2,
+              "sub": "range out"
+            }
+          ],
+          "edges": [
+            {
+              "from": "gen",
+              "to": "w1"
+            },
+            {
+              "from": "gen",
+              "to": "w2"
+            },
+            {
+              "from": "gen",
+              "to": "w3"
+            },
+            {
+              "from": "w1",
+              "to": "mg"
+            },
+            {
+              "from": "w2",
+              "to": "mg"
+            },
+            {
+              "from": "w3",
+              "to": "mg"
+            },
+            {
+              "from": "mg",
+              "to": "cons",
+              "label": "out",
+              "accent": true
+            }
+          ],
+          "caption": "**Fan-out**: vários workers leem do **mesmo** canal; cada tarefa vai para um só. **Fan-in**: os resultados convergem em um canal único, fechado depois que todos terminam. A ordem de saída não é a de entrada."
+        },
+        {
+          "type": "h",
+          "text": "Pipeline"
+        },
+        {
+          "type": "p",
+          "text": "Estágios ligados por canais: cada estágio é uma função que recebe `<-chan T`, devolve `<-chan U` e roda em sua goroutine. Todo envio é acompanhado de `case <-ctx.Done()`: se o consumidor desistir no meio, os estágios anteriores não ficam presos num envio sem ninguém para receber."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n\nfunc gen(ctx context.Context, nums ...int) <-chan int {\n\tout := make(chan int)\n\tgo func() {\n\t\tdefer close(out)\n\t\tfor _, n := range nums {\n\t\t\tselect {\n\t\t\tcase out <- n:\n\t\t\tcase <-ctx.Done():\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t}()\n\treturn out\n}\n\nfunc sq(ctx context.Context, in <-chan int) <-chan int {\n\tout := make(chan int)\n\tgo func() {\n\t\tdefer close(out)\n\t\tfor n := range in {\n\t\t\tselect {\n\t\t\tcase out <- n * n:\n\t\t\tcase <-ctx.Done():\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t}()\n\treturn out\n}\n\nfunc main() {\n\tctx, cancel := context.WithCancel(context.Background())\n\tdefer cancel() // garante que nenhum estágio fique preso\n\tfor v := range sq(ctx, sq(ctx, gen(ctx, 1, 2, 3))) {\n\t\tfmt.Println(v) // 1, 16, 81\n\t}\n}",
+          "file": "pipeline.go"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Cada estágio é **dono** do seu canal de saída: cria, escreve e fecha (`defer close(out)`). O `range` do estágio seguinte termina naturalmente quando o fechamento se propaga pela cadeia.",
+          "title": "Propriedade do canal"
+        },
+        {
+          "type": "h",
+          "text": "Quantos workers?"
+        },
+        {
+          "type": "p",
+          "text": "Para trabalho de CPU, o ganho é ~linear até `GOMAXPROCS` e depois estabiliza (ou piora levemente por troca de contexto e contenção). Para trabalho dominado por I/O, o ótimo é muito maior e depende do que o destino aguenta, não da CPU."
+        },
+        {
+          "type": "chart",
+          "kind": "line",
+          "title": "Vazão × nº de workers (tarefa de CPU, 8 núcleos)",
+          "xLabel": "workers",
+          "yLabel": "TAREFAS/S",
+          "yMax": 900,
+          "series": [
+            {
+              "name": "Ideal",
+              "tone": "muted",
+              "dashed": true,
+              "points": [
+                [
+                  1,
+                  100
+                ],
+                [
+                  8,
+                  800
+                ],
+                [
+                  16,
+                  800
+                ]
+              ]
+            },
+            {
+              "name": "Medido",
+              "tone": "primary",
+              "points": [
+                [
+                  1,
+                  100
+                ],
+                [
+                  2,
+                  195
+                ],
+                [
+                  4,
+                  380
+                ],
+                [
+                  6,
+                  550
+                ],
+                [
+                  8,
+                  700
+                ],
+                [
+                  10,
+                  705
+                ],
+                [
+                  12,
+                  700
+                ],
+                [
+                  16,
+                  685
+                ]
+              ]
+            }
+          ],
+          "caption": "Dados **ilustrativos** (não medidos): a curva cresce até `GOMAXPROCS` = 8 e depois satura. Perfile com `pprof` e `go test -bench` antes de dimensionar pools."
+        }
+      ]
+    },
+    {
+      "id": "limites",
+      "title": "Limitar, errar e encerrar com elegância",
+      "blocks": [
+        {
+          "type": "h",
+          "text": "Paralelismo limitado com semáforo"
+        },
+        {
+          "type": "p",
+          "text": "Quando cada item merece sua goroutine mas você não pode ter milhares ao mesmo tempo (conexões, descritores de arquivo, memória), use um **canal com buffer como semáforo**: `sem <- struct{}{}` adquire e `<-sem` libera. O envio bloqueia no limite."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n\t\"sync/atomic\"\n\t\"time\"\n)\n\nfunc main() {\n\tsem := make(chan struct{}, 3) // no máximo 3 simultâneas\n\tvar wg sync.WaitGroup\n\tvar cur, peak atomic.Int32\n\n\tfor range 10 {\n\t\tsem <- struct{}{} // bloqueia quando há 3 em voo\n\t\twg.Go(func() {\n\t\t\tdefer func() { <-sem }()\n\t\t\tn := cur.Add(1)\n\t\t\tfor {\n\t\t\t\tp := peak.Load()\n\t\t\t\tif n <= p || peak.CompareAndSwap(p, n) {\n\t\t\t\t\tbreak\n\t\t\t\t}\n\t\t\t}\n\t\t\ttime.Sleep(10 * time.Millisecond) // trabalho\n\t\t\tcur.Add(-1)\n\t\t})\n\t}\n\twg.Wait()\n\tfmt.Println(\"pico:\", peak.Load()) // 3\n}",
+          "file": "semaforo.go"
+        },
+        {
+          "type": "h",
+          "text": "errgroup: erros e cancelamento"
+        },
+        {
+          "type": "p",
+          "text": "`golang.org/x/sync/errgroup` é o `WaitGroup` com erros: `g.Go(func() error)` roda tarefas, `g.Wait()` devolve o **primeiro** erro não-nil, `WithContext` cancela o contexto assim que uma tarefa falha (ou quando `Wait` retorna), e `SetLimit(n)` limita a concorrência — `g.Go` bloqueia quando há `n` ativas, substituindo o semáforo manual. Combina com o rate limiter de `golang.org/x/time/rate` (token bucket):"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"net/http\"\n\n\t\"golang.org/x/sync/errgroup\"\n\t\"golang.org/x/time/rate\"\n)\n\nfunc fetchAll(ctx context.Context, urls []string) error {\n\tg, ctx := errgroup.WithContext(ctx)\n\tg.SetLimit(8) // no máximo 8 goroutines ativas; g.Go bloqueia se cheio\n\tlim := rate.NewLimiter(rate.Limit(20), 5) // 20 req/s, rajada de 5\n\n\tfor _, u := range urls {\n\t\tg.Go(func() error {\n\t\t\tif err := lim.Wait(ctx); err != nil { // respeita cancelamento\n\t\t\t\treturn err\n\t\t\t}\n\t\t\treq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)\n\t\t\tif err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\tresp, err := http.DefaultClient.Do(req)\n\t\t\tif err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\treturn resp.Body.Close()\n\t\t})\n\t}\n\treturn g.Wait() // primeiro erro não-nil; o ctx já foi cancelado\n}\n\nfunc main() { fmt.Println(fetchAll(context.Background(), nil)) }",
+          "file": "fetch.go"
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Se você usa só `ctx` do `errgroup.WithContext` dentro das tarefas, o cancelamento é cooperativo: tarefas que não olham o contexto continuam até acabar, e `Wait` espera todas. Não existe \"matar\" goroutine em Go.",
+          "title": "Cancelamento é cooperativo"
+        },
+        {
+          "type": "h",
+          "text": "Rate limiting"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Intervalo fixo**: `time.NewTicker(d)` dá um tique por período (exemplo abaixo). Simples, sem rajadas; os tiques perdidos são descartados se ninguém lê.",
+            "**Token bucket**: `rate.NewLimiter(r, burst)` permite rajadas até `burst` e taxa média `r`. Use `Wait(ctx)` (bloqueia respeitando cancelamento), `Allow()` (não bloqueia, devolve bool) ou `Reserve()`."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"time\"\n)\n\nfunc main() {\n\tctx, cancel := context.WithTimeout(context.Background(), 55*time.Millisecond)\n\tdefer cancel()\n\n\tt := time.NewTicker(10 * time.Millisecond) // 100 req/s\n\tdefer t.Stop()\n\n\tn := 0\n\tfor {\n\t\tselect {\n\t\tcase <-t.C:\n\t\t\tn++ // chamar a API aqui\n\t\tcase <-ctx.Done():\n\t\t\tfmt.Println(\"chamadas:\", n) // 5\n\t\t\treturn\n\t\t}\n\t}\n}",
+          "file": "ticker.go"
+        },
+        {
+          "type": "h",
+          "text": "Encerramento gracioso"
+        },
+        {
+          "type": "p",
+          "text": "Em Kubernetes, ao remover um pod o kubelet envia `SIGTERM` e, após o `terminationGracePeriodSeconds` (30 s por padrão), `SIGKILL`. Seu processo deve parar de aceitar novas conexões, **terminar o que está em andamento** e sair. `signal.NotifyContext` transforma o sinal em cancelamento de contexto:"
+        },
+        {
+          "type": "diagram",
+          "title": "Fluxo do shutdown",
+          "cols": 12,
+          "rows": 14,
+          "nodes": [
+            {
+              "id": "sig",
+              "label": "SIGTERM",
+              "x": 3,
+              "y": 0,
+              "w": 6,
+              "h": 2,
+              "sub": "kubelet · Ctrl-C"
+            },
+            {
+              "id": "nc",
+              "label": "NotifyContext",
+              "x": 3,
+              "y": 4,
+              "w": 6,
+              "h": 2,
+              "sub": "ctx.Done() fecha",
+              "variant": "accent"
+            },
+            {
+              "id": "sd",
+              "label": "srv.Shutdown",
+              "x": 3,
+              "y": 8,
+              "w": 6,
+              "h": 2,
+              "sub": "para de aceitar, drena"
+            },
+            {
+              "id": "ex",
+              "label": "main retorna",
+              "x": 3,
+              "y": 12,
+              "w": 6,
+              "h": 2,
+              "sub": "defers rodam"
+            }
+          ],
+          "edges": [
+            {
+              "from": "sig",
+              "to": "nc",
+              "label": "sinal"
+            },
+            {
+              "from": "nc",
+              "to": "sd",
+              "label": "cancela"
+            },
+            {
+              "from": "sd",
+              "to": "ex",
+              "label": "≤ timeout"
+            }
+          ],
+          "caption": "O timeout do `Shutdown` deve ser menor que o grace period do pod, senão o `SIGKILL` chega antes da limpeza terminar."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"log\"\n\t\"net/http\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n)\n\nfunc main() {\n\tctx, stop := signal.NotifyContext(context.Background(),\n\t\tsyscall.SIGINT, syscall.SIGTERM)\n\tdefer stop()\n\n\tsrv := &http.Server{Addr: \":8080\", Handler: http.DefaultServeMux}\n\tgo func() {\n\t\terr := srv.ListenAndServe()\n\t\tif err != nil && !errors.Is(err, http.ErrServerClosed) {\n\t\t\tlog.Fatal(err)\n\t\t}\n\t}()\n\n\t<-ctx.Done() // SIGINT/SIGTERM\n\tstop()       // 2º Ctrl-C volta ao comportamento padrão (mata)\n\n\tshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)\n\tdefer cancel()\n\tif err := srv.Shutdown(shCtx); err != nil {\n\t\tlog.Println(\"shutdown forçado:\", err)\n\t}\n}",
+          "file": "main.go"
+        },
+        {
+          "type": "callout",
+          "variant": "warning",
+          "text": "`Shutdown` não encerra goroutines que **você** iniciou dentro dos handlers. Passe `r.Context()` (cancelado quando o cliente desiste) para o trabalho de fundo e use `errgroup`/`WaitGroup` para esperá-lo antes de sair.",
+          "title": "Seus workers também precisam parar"
+        }
+      ]
+    },
+    {
+      "id": "memoria",
+      "title": "Data races e o modelo de memória",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Uma **data race** ocorre quando duas goroutines acessam a mesma posição de memória **sem sincronização** e pelo menos um dos acessos é escrita. O resultado não é \"valor desatualizado\": é comportamento **indefinido** em termos do modelo de memória. Compiladores e CPUs reordenam e mantêm valores em registradores e caches; sem uma relação de ordem, não há garantia do que cada goroutine enxerga."
+        },
+        {
+          "type": "p",
+          "text": "Estruturas multi-palavra pioram: interfaces, slices e strings têm dois ou três campos escritos separadamente. Uma race pode produzir uma interface com tipo de um valor e ponteiro de outro, e daí corromper memória. Mapas têm detecção embutida: escrita concorrente causa `fatal error: concurrent map writes`, que **não pode ser recuperado** com `recover`."
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n)\n\nfunc main() {\n\tvar wg sync.WaitGroup\n\tn := 0\n\tfor range 1000 {\n\t\twg.Go(func() { n++ }) // DATA RACE: read-modify-write sem sincronização\n\t}\n\twg.Wait()\n\tfmt.Println(n) // quase nunca 1000\n}",
+          "file": "race.go"
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "$ go run -race race.go\n==================\nWARNING: DATA RACE\nRead at 0x00c00011c038 by goroutine 10:\n  main.main.func1()  race.go:12\nPrevious write at 0x00c00011c038 by goroutine 9:\n  main.main.func1()  race.go:12\nGoroutine 10 (running) created at:\n  sync.(*WaitGroup).Go()"
+        },
+        {
+          "type": "h",
+          "text": "Happens-before"
+        },
+        {
+          "type": "p",
+          "text": "O modelo de memória do Go define a ordem garantida por **happens-before**: se A acontece-antes de B, então os efeitos de A são visíveis em B. Sem essa relação, não há garantia. As arestas que o Go oferece:"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Criação**: a instrução `go f()` acontece-antes do início de `f`.",
+            "**Canais**: um envio acontece-antes do recebimento correspondente terminar; `close` acontece-antes do recebimento que devolve o zero por estar fechado; em canal **sem buffer**, o recebimento acontece-antes do envio terminar.",
+            "**Mutex**: o `n`-ésimo `Unlock` acontece-antes do `n+1`-ésimo `Lock` retornar.",
+            "**WaitGroup**: cada `Done` acontece-antes de o `Wait` correspondente retornar. **Once**: o retorno de `f` acontece-antes de qualquer `Do` retornar.",
+            "**Atomics**: se a operação B observa o efeito da A, então A acontece-antes de B (consistência sequencial)."
+          ]
+        },
+        {
+          "type": "h",
+          "text": "Race detector"
+        },
+        {
+          "type": "p",
+          "text": "`go test -race`, `go run -race` e `go build -race` instrumentam leituras e escritas (ThreadSanitizer). Ele só detecta races que **realmente ocorrem** durante a execução, sem falsos positivos. Custa tipicamente 5–10x de CPU e 5–10x de memória: rode na CI sobre toda a suíte de testes, e em staging/carga se puder, mas não em produção."
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Uma suíte com testes concorrentes rodando `go test -race -count=10 ./...` encontra muito mais do que uma única execução, pois o interleaving muda a cada vez.",
+          "title": "Rode várias vezes"
+        },
+        {
+          "type": "h",
+          "text": "Corrigindo a race acima"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "var n atomic.Int64\nfor range 1000 {\n    wg.Go(func() { n.Add(1) }) // atômico: sem race\n}\nwg.Wait()\nfmt.Println(n.Load()) // sempre 1000"
+        },
+        {
+          "type": "p",
+          "text": "A alternativa com `sync.Mutex` também resolve; a escolha é de custo e clareza. Um contador simples pede `atomic`; invariantes entre vários campos pedem mutex (atomics isolados não dão atomicidade a *grupos* de operações)."
+        }
+      ]
+    },
+    {
+      "id": "leaks",
+      "title": "Goroutine leaks",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Uma goroutine nunca é coletada pelo GC enquanto estiver viva — mesmo bloqueada para sempre. Uma goroutine que ninguém mais conseguirá acordar é um **leak**: vaza a pilha, tudo o que ela referencia e, às vezes, conexões. A memória cresce devagar até o OOM."
+        },
+        {
+          "type": "h",
+          "text": "Causas comuns"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Envio sem receptor**: o consumidor desistiu (timeout, erro) e o produtor está preso em `ch <- v` num canal sem buffer.",
+            "**Recebimento sem emissor**: `for range ch` num canal que ninguém fecha.",
+            "**Faltou `ctx.Done()`** num `select` de goroutine de longa vida.",
+            "`time.Ticker` sem `Stop` e laços que nunca terminam; `sync.WaitGroup` com `Add` a mais, `Wait` eterno.",
+            "Mutex nunca liberado (`Unlock` esquecido em caminho de erro)."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "O exemplo abaixo mostra o primeiro caso, o mais comum, e sua correção. Em `buscaVaza`, se o timeout vencer, ninguém jamais lerá `ch`, e a goroutine fica presa no envio para sempre. Em `buscaOK`, o buffer de 1 deixa o envio concluir mesmo sem leitor:"
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"runtime\"\n\t\"time\"\n)\n\n// VAZA: sem buffer, se o chamador desistir o envio bloqueia para sempre.\nfunc buscaVaza(d time.Duration) string {\n\tch := make(chan string) // sem buffer\n\tgo func() {\n\t\ttime.Sleep(20 * time.Millisecond)\n\t\tch <- \"resultado\"\n\t}()\n\tselect {\n\tcase r := <-ch:\n\t\treturn r\n\tcase <-time.After(d):\n\t\treturn \"timeout\"\n\t}\n}\n\n// OK: buffer 1 garante que o envio nunca bloqueia.\nfunc buscaOK(ctx context.Context) string {\n\tch := make(chan string, 1)\n\tgo func() {\n\t\ttime.Sleep(20 * time.Millisecond)\n\t\tch <- \"resultado\"\n\t}()\n\tselect {\n\tcase r := <-ch:\n\t\treturn r\n\tcase <-ctx.Done():\n\t\treturn ctx.Err().Error()\n\t}\n}\n\nfunc main() {\n\tfor range 100 {\n\t\tbuscaVaza(time.Millisecond)\n\t}\n\ttime.Sleep(100 * time.Millisecond)\n\tfmt.Println(\"vazadas:\", runtime.NumGoroutine()-1)\n\n\tfor range 100 {\n\t\tctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)\n\t\tbuscaOK(ctx)\n\t\tcancel()\n\t}\n\ttime.Sleep(100 * time.Millisecond)\n\tfmt.Println(\"vazadas:\", runtime.NumGoroutine()-1)\n}",
+          "file": "leak.go"
+        },
+        {
+          "type": "callout",
+          "variant": "tip",
+          "text": "Regra prática: para cada `go`, saiba responder **\"o que faz esta goroutine terminar?\"** — um canal fechado, um `ctx.Done()`, o fim de um `range`. Se a resposta for \"nada\" ou \"depende do outro lado\", há um risco.",
+          "title": "A pergunta certa"
+        },
+        {
+          "type": "h",
+          "text": "Como detectar"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Métrica**: exporte `runtime.NumGoroutine()`; uma curva que só sobe é o sintoma.",
+            "**Perfil de goroutines**: com `net/http/pprof`, `GET /debug/pprof/goroutine?debug=2` lista todas as stacks e o estado (`chan send`, `chan receive`, `select`, `semacquire`) com há quanto tempo estão bloqueadas. Muitas stacks idênticas apontam o culpado. Compare dois instantâneos com `go tool pprof -base`.",
+            "**Testes**: `go.uber.org/goleak` falha o teste se sobrarem goroutines (`defer goleak.VerifyNone(t)` ou `goleak.VerifyTestMain(m)` no `TestMain`).",
+            "**Testes de tempo**: `testing/synctest` (estável no Go 1.25) roda o código numa \"bolha\" com relógio falso e detecta goroutines bloqueadas para sempre sem `time.Sleep` real.",
+            "O Go 1.26 introduziu, como **experimento** (`GOEXPERIMENT=goroutineleakprofile`), um perfil `goroutineleak` que identifica goroutines bloqueadas em primitivas inalcançáveis. Confirme o status na sua versão antes de depender dele."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "go",
+          "code": "func TestBusca(t *testing.T) {\n    defer goleak.VerifyNone(t) // falha se sobrar goroutine\n    // ...\n}",
+          "file": "busca_test.go"
+        }
+      ]
+    },
+    {
+      "id": "armadilhas",
+      "title": "Armadilhas comuns",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Armadilha",
+            "Sintoma",
+            "Correção"
+          ],
+          "rows": [
+            [
+              "`main` retorna cedo",
+              "Goroutines não terminam; saída incompleta",
+              "`WaitGroup`/`errgroup`, nunca `time.Sleep`"
+            ],
+            [
+              "`wg.Add` dentro da goroutine",
+              "`Wait` retorna antes (race no contador)",
+              "`Add` antes do `go`, ou use `wg.Go` (1.25)"
+            ],
+            [
+              "Copiar `sync.Mutex`/`WaitGroup`",
+              "Trava ou contagem duplicada; `go vet` reclama",
+              "Passe por ponteiro; campo em struct usada por ponteiro"
+            ],
+            [
+              "Enviar em canal fechado",
+              "`panic: send on closed channel`",
+              "Só o emissor fecha; coordene vários com `WaitGroup`"
+            ],
+            [
+              "Fechar duas vezes / canal nil",
+              "`panic: close of closed/nil channel`",
+              "Um dono por canal; `sync.Once` se necessário"
+            ],
+            [
+              "Deadlock total",
+              "`fatal error: all goroutines are asleep`",
+              "Revise ordem de locks e quem envia/recebe"
+            ],
+            [
+              "Deadlock parcial",
+              "Sem erro; requisições penduram",
+              "Timeouts via `context`; perfil `goroutine`"
+            ],
+            [
+              "Ordem de locks inconsistente",
+              "A espera B e B espera A",
+              "Defina uma ordem global; reduza locks aninhados"
+            ],
+            [
+              "Leitura de mapa durante escrita",
+              "`fatal error: concurrent map...`",
+              "Proteja com mutex ou use `sync.Map` nos casos certos"
+            ],
+            [
+              "Ignorar `cancel` do contexto",
+              "Timers e goroutines vivos além do necessário",
+              "`defer cancel()` logo após criar"
+            ],
+            [
+              "`panic` em goroutine",
+              "Processo inteiro cai",
+              "`defer recover` no topo da goroutine"
+            ],
+            [
+              "Capturar variável de laço (< Go 1.22)",
+              "Todas veem o último valor",
+              "`go.mod` com `go 1.22`+ ou copie `i := i`"
+            ],
+            [
+              "Excesso de goroutines em CPU",
+              "Mais troca de contexto, sem ganho",
+              "Pool com ~`GOMAXPROCS` workers"
+            ],
+            [
+              "Sem limite de goroutines em entrada externa",
+              "OOM com tráfego alto",
+              "Semáforo ou `errgroup.SetLimit`"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "variant": "danger",
+          "text": "\"Funciona na minha máquina\" não prova ausência de race. Se o código compartilha memória entre goroutines, rode a suíte com `-race` na CI. Races de produção aparecem como corrupção rara e impossível de reproduzir.",
+          "title": "Sempre -race na CI"
+        }
+      ]
+    },
+    {
+      "id": "glossario",
+      "title": "Glossário",
+      "blocks": [
+        {
+          "type": "terms",
+          "items": [
+            {
+              "term": "Goroutine",
+              "def": "Função executando de forma concorrente, gerenciada pelo runtime, com pilha pequena e crescente."
+            },
+            {
+              "term": "GMP",
+              "def": "G (goroutine), M (thread do SO), P (processor: contexto de execução com fila local)."
+            },
+            {
+              "term": "Work stealing",
+              "def": "P ocioso rouba metade da fila local de outro P para balancear carga."
+            },
+            {
+              "term": "Handoff",
+              "def": "Transferência do P de uma M bloqueada em syscall para outra M."
+            },
+            {
+              "term": "Netpoller",
+              "def": "Integração do runtime com epoll/kqueue/IOCP para I/O de rede sem thread por conexão."
+            },
+            {
+              "term": "Preempção assíncrona",
+              "def": "Interrupção de goroutine longa por sinal (Go 1.14+), sem depender de chamadas de função."
+            },
+            {
+              "term": "GOMAXPROCS",
+              "def": "Número de Ps, ou seja, de goroutines executando código Go em paralelo."
+            },
+            {
+              "term": "Rendezvous",
+              "def": "Encontro síncrono de emissor e receptor num canal sem buffer."
+            },
+            {
+              "term": "Canal nil",
+              "def": "Canal não inicializado; qualquer envio/recebimento bloqueia para sempre."
+            },
+            {
+              "term": "Context",
+              "def": "Valor que carrega cancelamento, prazo e dados escopados através de chamadas."
+            },
+            {
+              "term": "Fan-out / fan-in",
+              "def": "Distribuir trabalho entre vários workers / reunir resultados em um canal."
+            },
+            {
+              "term": "Data race",
+              "def": "Acesso concorrente não sincronizado a uma posição de memória com ao menos uma escrita."
+            },
+            {
+              "term": "Happens-before",
+              "def": "Relação de ordem do modelo de memória que garante visibilidade de escritas."
+            },
+            {
+              "term": "Goroutine leak",
+              "def": "Goroutine bloqueada para sempre, nunca coletada, retendo memória."
+            },
+            {
+              "term": "Token bucket",
+              "def": "Limitador de taxa que acumula fichas a uma taxa fixa e permite rajadas até a capacidade."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proximos",
+      "title": "Próximos passos",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Você agora tem o modelo mental completo: goroutines baratas, escalonadas por GMP, coordenadas por canais, `select`, `sync` e `context`, com ferramentas para provar que está correto (`-race`, `goleak`, `pprof`)."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Pratique reescrevendo um laço sequencial de chamadas HTTP como `errgroup` com `SetLimit` e `context`, e depois rode com `-race`.",
+            "**Parte 3 — Go em produção**: testes, benchmarks e fuzzing, `net/http`, layout de projeto, `pprof`, GC, containers e `client-go`/controllers."
+          ],
+          "ordered": true
+        },
+        {
+          "type": "callout",
+          "variant": "note",
+          "text": "Referências: *The Go Memory Model* (go.dev/ref/mem), *Go Concurrency Patterns* e *Advanced Go Concurrency Patterns* (Rob Pike / Sameer Ajmani), e o blog oficial *Go Concurrency Patterns: Pipelines and cancellation*.",
+          "title": "Leituras"
+        }
+      ]
+    }
+  ]
+}
